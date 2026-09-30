@@ -3,22 +3,19 @@ import asyncio
 import discord
 from discord.ext import commands, tasks
 from keep_alive import keep_alive
+from cogs.verify import NumberVerifyView, Button3SecVerifyView, AnimalVerifyView, AgeVerifyView, GameVerifyView
 
-# ตั้งค่า Intent
 intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# อัปเดตสถานะบอทแบบเรียลไทม์
 @tasks.loop(minutes=1)
 async def update_status():
     await bot.wait_until_ready()
     total_members = sum(guild.member_count for guild in bot.guilds)
     total_guilds = len(bot.guilds)
-    
-    # ขึ้นว่า "กำลังเล่น ..."
     activity = discord.Game(name=f"มีสมาชิก {total_members} คน | {total_guilds} เซิร์ฟเวอร์")
     await bot.change_presence(activity=activity)
 
@@ -26,7 +23,13 @@ async def update_status():
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     
-    # ซิงค์ Slash Commands
+    # ลงทะเบียน Persistent Views เพื่อรองรับ Data Persistence เวลารีสตาร์ท
+    bot.add_view(NumberVerifyView())
+    bot.add_view(Button3SecVerifyView())
+    bot.add_view(AnimalVerifyView())
+    bot.add_view(AgeVerifyView())
+    bot.add_view(GameVerifyView())
+
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s)")
@@ -37,19 +40,15 @@ async def on_ready():
         update_status.start()
 
 async def main():
-    # โหลดไฟล์ระบบต่างๆ ในโฟลเดอร์ cogs
     for filename in os.listdir('./cogs'):
         if filename.endswith('.py'):
             await bot.load_extension(f'cogs.{filename[:-3]}')
             print(f"Loaded Cog: {filename[:-3]}")
             
-    # เรียกใช้ keep_alive สำหรับ Render
     keep_alive()
-    
-    # ดึง Token จาก Environment Variable ใน Render
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        print("ERROR: DISCORD_TOKEN is missing in Environment Variables!")
+        print("ERROR: DISCORD_TOKEN is missing!")
         return
         
     await bot.start(token)
