@@ -8,7 +8,7 @@ from discord.ext import commands
 from database import db
 
 WHITE = discord.Color.from_rgb(255, 255, 255)
-LOG_CHANNEL_NAME = "Log"
+LOG_CHANNEL_NAME = "ȴⰙƓ"
 
 NO = "<a:1000035743:1554882610134524034>"
 OK = "<a:1000035763:1554920997382262874>"
@@ -157,7 +157,12 @@ class LogCog(commands.Cog):
             content = msg.content or ""
             if msg.attachments:
                 content += ("\n" if content else "") + "\n".join(f"📎 {a.filename}" for a in msg.attachments)
-            content = trunc(content) if content else "*(ไม่มีข้อความ / อ่านเนื้อหาไม่ได้)*"
+            if content:
+                content = trunc(content)
+            elif not self.bot.intents.message_content:
+                content = "*(อ่านเนื้อหาไม่ได้ ยังไม่ได้เปิด message_content ใน main.py)*"
+            else:
+                content = "*(ไม่มีข้อความ เช่น ส่งเป็นสติกเกอร์/embed อย่างเดียว)*"
             owner = msg.author
             # หาคนลบจาก audit log (ถ้าไม่มี = เจ้าของลบเอง)
             await asyncio.sleep(1.5)
