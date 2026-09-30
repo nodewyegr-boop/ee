@@ -67,12 +67,11 @@ class TimeoutCog(commands.Cog):
                 f"<a:1000035727:1554859928957755393> target : {target.mention}\n\n"
                 f"<a:1000035728:1554860189125967894> time : ({hours} hour)\n\n"
                 f"<a:1000035608:1554844998506123274> reason : {reason}\n\n"
-                f"🫧 **สิ้นสุด:** <t:{until_timestamp}:F> (<t:{until_timestamp}:R>)"
             )
 
             # กำหนด Footer ล่างสุดแบบภาพที่ 2
             embed.set_footer(
-                text="© 2026 COPYRIGHT 3UFFER0VERFLOW ALL RIGHTS RESERVED",
+                text="Bot by auoi",
                 icon_url=FOOTER_ICON_URL
             )
 
