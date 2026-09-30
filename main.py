@@ -8,8 +8,10 @@ from cogs.verify import NumberVerifyView, Button3SecVerifyView, AnimalVerifyView
 intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
+intents.message_content = True  # ให้ /log อ่านเนื้อหาข้อความที่ถูกลบได้ (ต้องเปิดใน Developer Portal ด้วย)
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 @tasks.loop(minutes=1)
 async def update_status():
@@ -19,10 +21,11 @@ async def update_status():
     activity = discord.Game(name=f"มีสมาชิก {total_members} คน | {total_guilds} เซิร์ฟเวอร์")
     await bot.change_presence(activity=activity)
 
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    
+
     # ลงทะเบียน Persistent Views เพื่อรองรับ Data Persistence เวลารีสตาร์ท
     bot.add_view(NumberVerifyView())
     bot.add_view(Button3SecVerifyView())
@@ -35,23 +38,24 @@ async def on_ready():
         print(f"Synced {len(synced)} slash command(s)")
     except Exception as e:
         print(f"Error syncing commands: {e}")
-        
+
     if not update_status.is_running():
         update_status.start()
+
 
 async def main():
     for filename in os.listdir('./cogs'):
         if filename.endswith('.py'):
             await bot.load_extension(f'cogs.{filename[:-3]}')
             print(f"Loaded Cog: {filename[:-3]}")
-            
+
     keep_alive()
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         print("ERROR: DISCORD_TOKEN is missing!")
         return
-        
     await bot.start(token)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
