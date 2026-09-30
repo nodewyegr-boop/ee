@@ -1,3 +1,5 @@
+# cogs/log.py  —  ไฟล์เดียวจบ ระบบ /log (log all)
+# เก็บห้อง log ใน database.py เดิม (ใช้ตาราง verify_panels, system_type="log") ไม่ต้องแก้ไฟล์อื่น
 import asyncio
 from typing import Optional
 
