@@ -577,7 +577,7 @@ class VerifyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="verify", description="คำสั่งสำหรับรับยศ")
+    @app_commands.command(name="verify", description="คำสั่งสำหรับรับยศ (แอดมินเท่านั้น)")
     @app_commands.guild_only()
     async def verify(self, interaction: discord.Interaction):
         if not is_admin(interaction.user):
