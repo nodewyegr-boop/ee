@@ -106,7 +106,7 @@ async def grant(interaction: discord.Interaction, system: str, good_text: str, e
 # ═════════════ 1) กรอกเลขรับยศ ═════════════
 class NumberModal(discord.ui.Modal, title="กรอกเลขรับยศ"):
     answer = discord.ui.TextInput(
-        label="กรอกเลขที่ถูกซ่อนไว้ (1000-9999)", placeholder="เช่น 1234",
+        label="กรอกเลขที่ถูกซ่อนไว้", placeholder="เช่น 1234",
         min_length=1, max_length=4,
     )
 
@@ -577,7 +577,7 @@ class VerifyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="verify", description="คำสั่งสำหรับรับยศ (แอดมินเท่านั้น)")
+    @app_commands.command(name="verify", description="คำสั่งสำหรับรับยศ")
     @app_commands.guild_only()
     async def verify(self, interaction: discord.Interaction):
         if not is_admin(interaction.user):
