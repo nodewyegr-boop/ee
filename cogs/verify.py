@@ -9,6 +9,7 @@ from discord.ext import commands
 from database import db
 
 WHITE = discord.Color.from_rgb(255, 255, 255)  # เส้นสีขาวข้าง embed
+PANEL_GIF = "https://cdn.discordapp.com/attachments/1489587803393364018/1554940385783189715/63b77fcf355e5479a829edc99252be68.gif?backend=b2&ex=6abeb695&is=6abd6515&hm=ca01cfc7ff4bece39745258b1bb6560f360380cd9adb4a7a1cb910568e3c417c&"
 
 # ───────────── อีโมจิ ─────────────
 NO = "<a:1000035729:1554863632528052315>"
@@ -105,7 +106,7 @@ async def grant(interaction: discord.Interaction, system: str, good_text: str, e
 # ═════════════ 1) กรอกเลขรับยศ ═════════════
 class NumberModal(discord.ui.Modal, title="กรอกเลขรับยศ"):
     answer = discord.ui.TextInput(
-        label="กรอกเลขที่ถูกซ่อนไว้", placeholder="เช่น 1234",
+        label="กรอกเลขที่ถูกซ่อนไว้ (1000-9999)", placeholder="เช่น 1234",
         min_length=1, max_length=4,
     )
 
@@ -157,7 +158,7 @@ class ButtonPickView(discord.ui.View):
         good = random.randrange(3)  # ตำแหน่งปุ่มเขียว สุ่มซ้าย/กลาง/ขวา
         for i in range(3):
             btn = discord.ui.Button(
-                label="🍄",
+                emoji=pe(E742) if i == good else pe(E743),  # เขียว=E742, แดง=E743
                 style=discord.ButtonStyle.success if i == good else discord.ButtonStyle.danger,
             )
             btn.callback = self._make_cb(i == good)
@@ -400,7 +401,9 @@ def build_panel(system: str, role: discord.Role):
             f"{E764} พี่ๆกดลิสด้านล่างรับคำใบ้ เเล้วเลือกเกมที่คิดว่าใช่ ถ้าทายถูกหนูให้ยศ {role.mention} เองน้าา"
         )
         view = GameVerifyView()
-    return emb(desc), view
+    embed = emb(desc)
+    embed.set_image(url=PANEL_GIF)  # gif ใต้แผงรับยศทุกแบบ
+    return embed, view
 
 
 # ═════════════ เซ็ตระบบ (ฝั่งแอดมิน) ═════════════
@@ -574,7 +577,7 @@ class VerifyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="verify", description="คำสั่งสำหรับรับยศ")
+    @app_commands.command(name="verify", description="คำสั่งสำหรับรับยศ (แอดมินเท่านั้น)")
     @app_commands.guild_only()
     async def verify(self, interaction: discord.Interaction):
         if not is_admin(interaction.user):
