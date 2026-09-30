@@ -12,7 +12,6 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # ตารางสำหรับเก็บการตั้งค่าระบบต่างๆ ในอนาคต
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
