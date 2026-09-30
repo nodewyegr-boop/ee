@@ -60,7 +60,7 @@ class StartView(discord.ui.View):
             humans, bots = await self.purge(guild)
             result = emb(
                 f"{E_DONE} เสร็จเเล้วน้าาพี่ หนูเตะบัญชีเเปลกไปทั้งหมด **{humans}** "
-                f"หนูเตะบอทไป **{bots}** (พวกบอทไม่มีเครื่องหมายยืนยันอะ)")
+                f"หนูเตะบอทไป **{bots}** (บอทไม่มีเครื่องหมายยืนยัน)")
         except Exception:
             result = emb(f"{E_DENY} มีบางอย่างผิดพลาดระหว่างทำงาน ลองใหม่อีกทีน้าา")
         finally:
@@ -113,7 +113,7 @@ class SecurityCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="security_system", description="ระบบป้องกันสูงสุด (หัวดิสเท่านั้น)")
+    @app_commands.command(name="security_system", description="ระบบป้องกันด่วน (หัวดิสเท่านั้น)")
     @app_commands.guild_only()
     async def security_system(self, interaction: discord.Interaction):
         # ทุกคนใช้คำสั่งได้ แต่กดเริ่มได้เฉพาะหัวดิส (เห็นคนเดียว เพื่อให้ embed เปลี่ยนเฉพาะของคนกด)
