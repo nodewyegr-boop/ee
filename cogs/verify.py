@@ -110,7 +110,6 @@ class ButtonGameView(discord.ui.View):
         super().__init__(timeout=60)
         self.role_id = role_id
 
-        # สร้าง 3 ปุ่ม
         green_btn = discord.ui.Button(style=discord.ButtonStyle.success, emoji="<a:1000035603:1554845277071089736>", custom_id="green")
         red_btn1 = discord.ui.Button(style=discord.ButtonStyle.danger, emoji="<a:1000035743:1554882610134524034>", custom_id="red1")
         red_btn2 = discord.ui.Button(style=discord.ButtonStyle.danger, emoji="<a:1000035743:1554882610134524034>", custom_id="red2")
@@ -136,7 +135,7 @@ class ButtonGameView(discord.ui.View):
             except Exception:
                 embed = discord.Embed(description="<a:1000035729:1554863632528052315> บอทไม่มีสิทธิ์ให้ยศนี้", color=0xFFFFFF)
         else:
-            embed = discord.Embed(description="<a:1000035729:1554863632528052315> ไม่พบบทบาท", color=0xFFFFFF)
+            embed = discord.Embed(description="<a:1000035729:1554863632528052315> ไม่พบบทบาทในระบบ", color=0xFFFFFF)
         await interaction.response.edit_message(embed=embed, view=None)
 
     async def red_click(self, interaction: discord.Interaction):
@@ -221,7 +220,7 @@ class AnimalAnswerSelect(discord.ui.Select):
                 except Exception:
                     embed = discord.Embed(description="<a:1000035729:1554863632528052315> บอทไม่มีสิทธิ์ให้ยศนี้", color=0xFFFFFF)
             else:
-                embed = discord.Embed(description="<a:1000035729:1554863632528052315> ไม่พบบทบาท", color=0xFFFFFF)
+                embed = discord.Embed(description="<a:1000035729:1554863632528052315> ไม่พบบทบาทในระบบ", color=0xFFFFFF)
         else:
             embed = discord.Embed(description="<a:1000035743:1554882610134524034> โอ๋ๆไม่เป็นไรนะพี่ ไว้มาตอบไว้น้าาา", color=0xFFFFFF)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -315,7 +314,7 @@ class AgeAnswerSelect(discord.ui.Select):
                 except Exception:
                     embed = discord.Embed(description="<a:1000035729:1554863632528052315> บอทไม่มีสิทธิ์ให้ยศนี้", color=0xFFFFFF)
             else:
-                embed = discord.Embed(description="<a:1000035729:1554863632528052315> ไม่พบบทบาท", color=0xFFFFFF)
+                embed = discord.Embed(description="<a:1000035729:1554863632528052315> ไม่พบบทบาทในระบบ", color=0xFFFFFF)
         else:
             embed = discord.Embed(description="<a:1000035764:1554920142146904164> โอ๋ๆ ไม่เป็นไรน้าา พี่ เอาใหม่นะพี่ เดียวหนูใบ้ให้ง่ายกว่าเดิมน้าาา", color=0xFFFFFF)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -397,7 +396,7 @@ class GameAnswerSelect(discord.ui.Select):
                 except Exception:
                     embed = discord.Embed(description="<a:1000035729:1554863632528052315> บอทไม่มีสิทธิ์ให้ยศนี้", color=0xFFFFFF)
             else:
-                embed = discord.Embed(description="<a:1000035729:1554863632528052315> ไม่พบบทบาท", color=0xFFFFFF)
+                embed = discord.Embed(description="<a:1000035729:1554863632528052315> ไม่พบบทบาทในระบบ", color=0xFFFFFF)
         else:
             embed = discord.Embed(description="<a:1000035764:1554920142146904164> ไม่เป็นไรน้าาาพี่ เอาใหม่ เดียวดูให้คำใบ้ง่ายกว่าเดิมให้เองง", color=0xFFFFFF)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -446,7 +445,7 @@ class GameVerifyView(discord.ui.View):
 
 
 # ------------------------------------------------------------------
-# 2. ADMIN SETUP VIEWS (หน้าต่างสำหรับ Admin ตั้งค่าในแต่ละระบบ)
+# 2. ADMIN SETUP VIEWS (แก้ไขจุดที่เกิด Error เรียบร้อยแล้ว)
 # ------------------------------------------------------------------
 
 class AdminSetupView(discord.ui.View):
@@ -456,17 +455,19 @@ class AdminSetupView(discord.ui.View):
         self.selected_role = None
         self.selected_channel = None
 
-    @discord.ui.role_select(placeholder="เลือกยศที่ผู้ใช้จะได้รับ")
+    # แก้ไข syntax การเลือก Role
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="เลือกยศที่ผู้ใช้จะได้รับ")
     async def select_role_cb(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
         self.selected_role = select.values[0]
         await interaction.response.send_message(embed=discord.Embed(description=f"เลือกยศ {self.selected_role.mention} เรียบร้อย", color=0xFFFFFF), ephemeral=True)
 
-    @discord.ui.channel_select(placeholder="เลือกห้องที่จะส่งระบบไป", channel_types=[discord.ChannelType.text])
+    # แก้ไข syntax การเลือก Channel
+    @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="เลือกห้องที่จะส่งระบบไป", channel_types=[discord.ChannelType.text])
     async def select_channel_cb(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         self.selected_channel = select.values[0]
         await interaction.response.send_message(embed=discord.Embed(description=f"เลือกห้อง {self.selected_channel.mention} เรียบร้อย", color=0xFFFFFF), ephemeral=True)
 
-    @discord.ui.button(label="เริ่มม", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="เริ่มม", style=discord.ButtonStyle.success, emoji="<a:1000035606:1554848463320129567>")
     async def start_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.selected_role or not self.selected_channel:
             await interaction.response.send_message(embed=discord.Embed(description="<a:1000035729:1554863632528052315> กรุณาเลือกยศและห้องให้ครบก่อนน้าา", color=0xFFFFFF), ephemeral=True)
@@ -543,7 +544,7 @@ class AdminSetupView(discord.ui.View):
 
         await interaction.response.send_message(embed=discord.Embed(description=msg_text, color=0xFFFFFF), ephemeral=True)
 
-    @discord.ui.button(label="ล้างตัวเลือก", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="ล้างตัวเลือก", style=discord.ButtonStyle.secondary, emoji="<a:1000035724:1554844520674500678>")
     async def clear_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.selected_role = None
         self.selected_channel = None
