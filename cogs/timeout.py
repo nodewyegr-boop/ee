@@ -7,7 +7,7 @@ class TimeoutCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="timeout", description="หมดเวลา (ชั่วโมง)")
+    @app_commands.command(name="timeout", description="หมดเวลา (แอดมินเท่านั้น)")
     @app_commands.describe(
         target="คนที่ต้องการให้หมดเวลา",
         hours="ระยะเวลาที่โดนหมดเวลา (ชั่วโมง สูงสุด 330)",
