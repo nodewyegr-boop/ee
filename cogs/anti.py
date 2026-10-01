@@ -15,7 +15,7 @@ from database import db
 WHITE = discord.Color.from_rgb(255, 255, 255)
 
 # ───────── ค่าที่ปรับได้ ─────────
-RATE_N = 5          # ครบกี่ครั้ง ...
+RATE_N = 3          # ครบกี่ครั้ง ...
 RATE_WINDOW = 5.0   # ... ภายในกี่วินาที (ใช้กับ spam และ nuke ทุกแบบ)
 ROUNDS = 3          # สเเปม/ลิ้ง ครบกี่รอบถึงลงโทษ (รอบที่ 1-2 เตือน รอบที่ 3 ลงโทษ)
 WARN_DELETE_AFTER = 5
