@@ -19,6 +19,8 @@ RATE_N = 5          # ครบกี่ครั้ง ...
 RATE_WINDOW = 5.0   # ... ภายในกี่วินาที (ใช้กับ spam และ nuke ทุกแบบ)
 ROUNDS = 3          # สเเปม/ลิ้ง ครบกี่รอบถึงลงโทษ (รอบที่ 1-2 เตือน รอบที่ 3 ลงโทษ)
 WARN_DELETE_AFTER = 5
+STRIKE_TTL = 600    # วินาที: คำเตือนแต่ละครั้งอยู่ในความจำ 10 นาที แล้วหมดอายุ (กันนับสะสมข้ามวัน)
+MIN_ACCOUNT_AGE = timedelta(days=7)
 
 # ───────── อีโมจิ ─────────
 E793 = "<:1000035793:1554977816431431850>"
@@ -80,6 +82,9 @@ def init_tables():
     q("""CREATE TABLE IF NOT EXISTS aw_whitelist (
         guild_id INTEGER, kind TEXT, user_id INTEGER, added_by INTEGER,
         PRIMARY KEY (guild_id, kind, user_id))""")
+    q("""CREATE TABLE IF NOT EXISTS aw_wl_targets (
+        guild_id INTEGER, system TEXT, target_type TEXT, target_id INTEGER, added_by INTEGER,
+        PRIMARY KEY (guild_id, system, target_type, target_id))""")
     q("""CREATE TABLE IF NOT EXISTS aw_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, user_id INTEGER,
         kind TEXT, reason TEXT, extra INTEGER DEFAULT 0, created_at INTEGER)""")
@@ -118,6 +123,8 @@ def load(gid: int) -> dict:
         if s in c:
             c[s] = dict(enabled=en, mode=mode, timeout=tm, link_mode=lm, status_by=sb, set_by=sby)
     c["wl"] = {(k, u) for k, u in q("SELECT kind, user_id FROM aw_whitelist WHERE guild_id=?", (gid,), many=True)}
+    c["wlt"] = {(sy, t, i) for sy, t, i in q(
+        "SELECT system, target_type, target_id FROM aw_wl_targets WHERE guild_id=?", (gid,), many=True)}
     CACHE[gid] = c
     return c
 
@@ -133,6 +140,39 @@ def upsert(gid: int, system: str, **kw):
 
 def whitelisted(c: dict, uid: int, system: str) -> bool:
     return (system, uid) in c["wl"] or ("all", uid) in c["wl"]
+
+
+def is_wl(c: dict, system: str, uid=None, roles=(), channel=None) -> bool:
+    """whitelist ครอบคลุม คน / ยศ / ช่อง / หมวดหมู่ (kind 'all' = ทุกระบบ ยกเว้นเชิญบอทไม่มีติ๊ก)"""
+    systems = (system, "all")
+    if uid is not None and any((s, uid) in c["wl"] for s in systems):
+        return True
+    rids = {getattr(r, "id", r) for r in roles}
+    if any((s, "role", r) in c["wlt"] for s in systems for r in rids):
+        return True
+    if channel is not None:
+        ids = {channel.id}
+        if isinstance(channel, discord.Thread) and channel.parent_id:
+            ids.add(channel.parent_id)
+        if any((s, "channel", i) in c["wlt"] for s in systems for i in ids):
+            return True
+        cat = getattr(channel, "category_id", None)
+        if cat and any((s, "category", cat) in c["wlt"] for s in systems):
+            return True
+    return False
+
+
+def toggle_wl_target(gid: int, system: str, ttype: str, tid: int, by: int) -> bool:
+    if q("SELECT 1 FROM aw_wl_targets WHERE guild_id=? AND system=? AND target_type=? AND target_id=?",
+         (gid, system, ttype, tid), one=True):
+        q("DELETE FROM aw_wl_targets WHERE guild_id=? AND system=? AND target_type=? AND target_id=?",
+          (gid, system, ttype, tid))
+        added = False
+    else:
+        q("INSERT INTO aw_wl_targets VALUES (?,?,?,?,?)", (gid, system, ttype, tid, by))
+        added = True
+    invalidate(gid)
+    return added
 
 
 def toggle_wl(gid: int, kind: str, uid: int, by: int) -> bool:
@@ -187,6 +227,10 @@ def system_embed(gid: int, s: str) -> discord.Embed:
             f"• เตะ/เเบน/หมดเวลาสมาชิกเร็วเกิน {RATE_N} คนต่อ {int(RATE_WINDOW)} วิ\n"
             f"• สเเปมข้อความรวมทุกห้องเร็วเกิน {RATE_N} ข้อความต่อ {int(RATE_WINDOW)} วิ\n"
             f"• เเท็ก @everyone @here หรือยศ เร็วเกิน {RATE_N} เเท็กต่อ {int(RATE_WINDOW)} วิ\n\n"
+            "เเละยังป้องกัน **คน** อีกด้วย\n"
+            "• คนที่ไม่มีโปรไฟล์ หรืออายุบัญชีไม่ถึง 7 วัน เข้าเซิฟ → เตะ + เเจ้งเหตุผลทาง Dm\n"
+            "• มีการให้ยศที่มีสิทธิ์เเอดมิน → เเจ้งเเอดมินทุกคนทาง Dm\n"
+            "• มีการเปิดสิทธิ์เเอดมินให้ยศ → เเจ้งเเอดมินทุกคนทาง Dm\n\n"
             + status_line(c, s))
     extra = f"\nโหมดลงโทษ: **{MODE_NAME[cfg['mode']]}**"
     if cfg["mode"] == "timeout":
@@ -313,16 +357,22 @@ class SystemView(AdminView):
 # ---- whitelist ----
 def wl_embed(gid: int, kind: str) -> discord.Embed:
     c = load(gid)
-    users = [u for k, u in c["wl"] if k == kind]
-    text = " ".join(f"<@{u}>" for u in users) or "ไม่มี"
-    if len(text) > 3000:
-        text = text[:3000] + "…"
+
+    def fmt(items):
+        t = " ".join(items) or "ไม่มี"
+        return t if len(t) <= 900 else t[:900] + "…"
+
+    users = fmt(f"<@{u}>" for k, u in c["wl"] if k == kind)
+    roles = fmt(f"<@&{i}>" for sy, t, i in c["wlt"] if sy == kind and t == "role")
+    chans = fmt(f"<#{i}>" for sy, t, i in c["wlt"] if sy == kind and t == "channel")
+    cats = fmt(f"<#{i}>" for sy, t, i in c["wlt"] if sy == kind and t == "category")
     return emb(
         f"# {E803} whitelist\n\n"
-        f"พี่ๆแอดมินมอบ whitelist ให้คนธรรมดาได้ เเต่ถ้าเป็นบอท หรือข้อ \"คนเชิญบอทไม่มีติ๊ก\" ต้องพี่หัวดิสเท่านั้นน้าา\n\n"
+        "พี่ๆแอดมินมอบ whitelist ให้คนธรรมดา ยศ ช่อง หรือหมวดหมู่ได้ เเต่ถ้าเป็นบอท (หรือยศของบอท) "
+        "หรือข้อ \"คนเชิญบอทไม่มีติ๊ก\" ต้องพี่หัวดิสเท่านั้นน้าา\n\n"
         f"ประเภทที่เลือก: **{WL_NAME[kind]}**\n"
-        "เลือกคนด้านล่าง (เลือกซ้ำ = เอาออก)\n\n"
-        f"{E767} รายชื่อที่ whitelist อยู่: {text}")
+        "เลือกด้านล่างได้เลย (เลือกซ้ำ = เอาออก)\n\n"
+        f"{E767} คน: {users}\n{E767} ยศ: {roles}\n{E767} ช่อง: {chans}\n{E767} หมวดหมู่: {cats}")
 
 
 class WhitelistView(AdminView):
@@ -333,35 +383,62 @@ class WhitelistView(AdminView):
             discord.SelectOption(label=WL_NAME[k][:100], value=k, default=(k == kind))
             for k in ("spam", "link", "nuke", "all", "botinvite")])
         us = discord.ui.UserSelect(placeholder="เลือกคน/บอท", min_values=1, max_values=10, row=1)
-        ks.callback = self.on_kind
-        us.callback = self.on_users
-        self.ks, self.us = ks, us
-        self.add_item(ks)
-        self.add_item(us)
+        rs = discord.ui.RoleSelect(placeholder="เลือกยศ", min_values=1, max_values=10, row=2)
+        cs = discord.ui.ChannelSelect(
+            placeholder="เลือกช่อง/หมวดหมู่", min_values=1, max_values=10, row=3,
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.voice,
+                           discord.ChannelType.forum, discord.ChannelType.category])
+        ks.callback, us.callback, rs.callback, cs.callback = self.on_kind, self.on_users, self.on_roles, self.on_channels
+        self.ks, self.us, self.rs, self.cs = ks, us, rs, cs
+        for it in (ks, us, rs, cs):
+            self.add_item(it)
+
+    async def refresh(self, interaction: discord.Interaction, notice: Optional[str] = None):
+        await interaction.response.edit_message(embed=wl_embed(interaction.guild.id, self.kind),
+                                                view=WhitelistView(self.owner_id, self.kind))
+        if notice:
+            await interaction.followup.send(embed=emb(f"{E790} {notice}"), ephemeral=True)
 
     async def on_kind(self, interaction: discord.Interaction):
-        kind = self.ks.values[0]
-        await interaction.response.edit_message(embed=wl_embed(interaction.guild.id, kind),
-                                                view=WhitelistView(self.owner_id, kind))
+        self.kind = self.ks.values[0]
+        await self.refresh(interaction)
+
+    def _is_owner(self, interaction) -> bool:
+        return interaction.user.id == interaction.guild.owner_id
 
     async def on_users(self, interaction: discord.Interaction):
-        gid = interaction.guild.id
-        is_owner = interaction.user.id == interaction.guild.owner_id
-        if self.kind == "botinvite" and not is_owner:
-            await interaction.response.edit_message(embed=wl_embed(gid, self.kind), view=WhitelistView(self.owner_id, self.kind))
-            return await interaction.followup.send(
-                embed=emb(f"{E790} whitelist คนเชิญบอทไม่มีติ๊ก ให้ได้เเค่พี่หัวดิสเท่านั้นน้าา"), ephemeral=True)
+        gid, owner = interaction.guild.id, self._is_owner(interaction)
+        if self.kind == "botinvite" and not owner:
+            return await self.refresh(interaction, "whitelist คนเชิญบอทไม่มีติ๊ก ให้ได้เเค่พี่หัวดิสเท่านั้นน้าา")
         denied = 0
         for u in self.us.values:
-            if u.bot and not is_owner:
+            if u.bot and not owner:
                 denied += 1
                 continue
             toggle_wl(gid, self.kind, u.id, interaction.user.id)
-        await interaction.response.edit_message(embed=wl_embed(gid, self.kind), view=WhitelistView(self.owner_id, self.kind))
-        if denied:
-            await interaction.followup.send(
-                embed=emb(f"{E790} มี **{denied}** บอทที่ข้ามไป เพราะ whitelist บอทต้องพี่หัวดิสเท่านั้นน้าา"),
-                ephemeral=True)
+        await self.refresh(interaction, f"มี **{denied}** บอทที่ข้ามไป เพราะ whitelist บอทต้องพี่หัวดิสเท่านั้นน้าา"
+                           if denied else None)
+
+    async def on_roles(self, interaction: discord.Interaction):
+        gid, owner = interaction.guild.id, self._is_owner(interaction)
+        if self.kind == "botinvite":
+            return await self.refresh(interaction, "ข้อนี้ whitelist ได้เเค่ \"คน\" เท่านั้นน้าา")
+        denied = 0
+        for r in self.rs.values:
+            if r.managed and not owner:  # ยศของบอท
+                denied += 1
+                continue
+            toggle_wl_target(gid, self.kind, "role", r.id, interaction.user.id)
+        await self.refresh(interaction, f"มี **{denied}** ยศของบอทที่ข้ามไป ต้องพี่หัวดิสเท่านั้นน้าา" if denied else None)
+
+    async def on_channels(self, interaction: discord.Interaction):
+        gid = interaction.guild.id
+        if self.kind == "botinvite":
+            return await self.refresh(interaction, "ข้อนี้ whitelist ได้เเค่ \"คน\" เท่านั้นน้าา")
+        for ch in self.cs.values:
+            t = "category" if ch.type == discord.ChannelType.category else "channel"
+            toggle_wl_target(gid, self.kind, t, ch.id, interaction.user.id)
+        await self.refresh(interaction)
 
 
 # ---- เช็คคนกระทำผิด ----
@@ -458,9 +535,10 @@ class MainView(AdminView):
 
 
 # ═════════════ ตัวตรวจจริง ═════════════
-SPAM: dict = defaultdict(deque)      # (gid, uid) -> เวลาข้อความ
+SPAM: dict = defaultdict(deque)      # (gid, uid) -> deque[(เวลา, ข้อความ)]
+ACTIVE: dict = {}                    # (gid, uid) -> เวลาที่ยังถือว่ากำลังสเเปมอยู่ (ลบข้อความใหม่ทันที)
 EVENTS: dict = defaultdict(deque)    # (gid, bot_id, kind) -> เวลาเหตุการณ์ nuke
-STRIKES: dict = {}                   # (gid, uid, system) -> จำนวนรอบที่ทำผิด
+STRIKES: dict = {}                   # (gid, uid, system) -> deque[เวลาที่เตือน] (หมดอายุ 10 นาที)
 NUKED: dict = {}                     # (gid, bot_id) -> เวลาที่เพิ่งเตะ
 
 ZW = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
@@ -490,6 +568,29 @@ def window_count(dq: deque, now: float, weight: int = 1) -> int:
     while dq and now - dq[0] > RATE_WINDOW:
         dq.popleft()
     return len(dq)
+
+
+def spam_window(dq: deque, now: float, msg: discord.Message) -> int:
+    dq.append((now, msg))
+    while dq and now - dq[0][0] > RATE_WINDOW:
+        dq.popleft()
+    return len(dq)
+
+
+async def purge_msgs(msgs: list):
+    """ลบข้อความทั้งหมดที่ส่งมา (5 ข้อความลบ 5, 9 ข้อความลบ 9)"""
+    by_ch = defaultdict(list)
+    for m in msgs:
+        by_ch[m.channel].append(m)
+    for ch, ms in by_ch.items():
+        try:
+            if len(ms) == 1:
+                await ms[0].delete()
+            else:
+                for i in range(0, len(ms), 100):
+                    await ch.delete_messages(ms[i:i + 100])
+        except discord.HTTPException:
+            pass
 
 
 def dv(entry: discord.AuditLogEntry, name: str):
@@ -526,9 +627,10 @@ class AntiSystemCog(commands.Cog):
         if guild is None or author.id == self.bot.user.id or message.webhook_id:
             return
         c = load(guild.id)
+        roles = getattr(author, "roles", [])
 
         if author.bot:  # บอท → anti nuke เท่านั้น (เตะบอทอย่างเดียว)
-            if c["nuke"]["enabled"] and not whitelisted(c, author.id, "nuke"):
+            if c["nuke"]["enabled"] and not is_wl(c, "nuke", author.id, roles, message.channel):
                 now = time.monotonic()
                 if window_count(EVENTS[(guild.id, author.id, "msg")], now) >= RATE_N:
                     return await self.nuke_trigger(guild, author, "msg")
@@ -538,17 +640,26 @@ class AntiSystemCog(commands.Cog):
                     await self.nuke_trigger(guild, author, "tag")
             return
 
-        if c["spam"]["enabled"] and not whitelisted(c, author.id, "spam"):
+        if c["spam"]["enabled"] and not is_wl(c, "spam", author.id, roles, message.channel):
             key = (guild.id, author.id)
-            if window_count(SPAM[key], time.monotonic()) >= RATE_N:
-                SPAM[key].clear()  # เริ่มนับรอบใหม่ (ไม่สนเนื้อหา กันพวกต่อท้ายด้วยตัวอักษรเเปลกๆ)
+            now = time.monotonic()
+            dq = SPAM[key]
+            n = spam_window(dq, now, message)
+            if now < ACTIVE.get(key, 0):  # ยังสเเปมต่อเนื่อง → ลบข้อความใหม่ทันที
+                ACTIVE[key] = now + RATE_WINDOW
+                await purge_msgs([message])
+            if n >= RATE_N:
+                msgs = [m for _, m in dq]  # ข้อความทั้งหมดในรอบนี้ (5 หรือ 9 ก็ลบหมด)
+                dq.clear()
+                ACTIVE[key] = now + RATE_WINDOW
                 await self.violation(message, "spam", c["spam"], "หยุดสเเปมได้เเล้วค่ะพี่",
-                                     f"สเเปมข้อความเร็วเกิน {RATE_N} ข้อความต่อ {int(RATE_WINDOW)} วิ", delete=False)
+                                     f"สเเปมข้อความเร็วเกิน {RATE_N} ข้อความต่อ {int(RATE_WINDOW)} วิ", msgs)
 
-        if c["link"]["enabled"] and not whitelisted(c, author.id, "link") and message.content:
+        if (c["link"]["enabled"] and message.content
+                and not is_wl(c, "link", author.id, roles, message.channel)):
             if self.has_bad_link(message.content, c["link"]["link_mode"]):
                 await self.violation(message, "link", c["link"], "หยุดส่งลิ้งได้เเล้วค่ะพี่",
-                                     "ส่งลิ้งที่ไม่อนุญาต", delete=True)
+                                     "ส่งลิ้งที่ไม่อนุญาต", [message])
 
     @staticmethod
     def has_bad_link(content: str, mode: str) -> bool:
@@ -562,39 +673,34 @@ class AntiSystemCog(commands.Cog):
         return bool(urls) or has_discord
 
     async def violation(self, message: discord.Message, system: str, cfg: dict,
-                        stop_text: str, reason: str, delete: bool):
+                        stop_text: str, reason: str, to_delete: list):
         guild, member = message.guild, message.author
-        if delete:
-            try:
-                await message.delete()
-            except discord.HTTPException:
-                pass
+        await purge_msgs(to_delete)  # ลบข้อความที่ทำผิดทั้งหมดก่อน
+
         mode = cfg["mode"]
         key = (guild.id, member.id, system)
-        n = STRIKES.get(key, 0) + 1
-
-        async def say(text: str):
-            try:
-                if delete:
-                    await message.channel.send(f"{member.mention} {text}", delete_after=WARN_DELETE_AFTER,
-                                               allowed_mentions=discord.AllowedMentions(users=[member]))
-                else:
-                    await message.reply(text, delete_after=WARN_DELETE_AFTER, mention_author=False)
-            except discord.HTTPException:
-                pass
+        now = time.monotonic()
+        dq = STRIKES.setdefault(key, deque())
+        while dq and now - dq[0] > STRIKE_TTL:  # คำเตือนเก่าเกิน 10 นาที = หมดอายุ
+            dq.popleft()
+        dq.append(now)
+        n = len(dq)
 
         if mode != "warn" and n >= ROUNDS:
             if await self.punish(member, mode, cfg["timeout"], f"{reason} (ครบ {ROUNDS} รอบ)"):
                 STRIKES.pop(key, None)
                 log_event(guild.id, member.id, mode, reason, cfg["timeout"] if mode == "timeout" else 0)
                 return
-            n = ROUNDS - 1  # ลงโทษไม่ได้ (ยศบอทไม่ถึง) → เตือนต่อ
 
-        STRIKES[key] = n
         conseq = {"warn": "", "kick": " ไม่งั้นหนูคงต้องเตะพี่", "ban": " ไม่งั้นหนูคงต้องเเบนพี่",
                   "timeout": " ไม่งั้นหนูคงต้องหมดเวลาพี่"}[mode]
         log_event(guild.id, member.id, "warn", reason)
-        await say(f"{E727} {stop_text}{conseq}")
+        try:  # ข้อความถูกลบไปแล้ว เลยส่งแท็กในห้องแทนการตอบกลับ
+            await message.channel.send(f"{member.mention} {E727} {stop_text}{conseq}",
+                                       delete_after=WARN_DELETE_AFTER,
+                                       allowed_mentions=discord.AllowedMentions(users=[member]))
+        except discord.HTTPException:
+            pass
 
     async def punish(self, member: discord.Member, mode: str, minutes: int, reason: str) -> bool:
         guild, me = member.guild, member.guild.me
@@ -643,9 +749,16 @@ class AntiSystemCog(commands.Cog):
 
         if entry.action is A.bot_add:
             return await self.check_bot_invite(entry, c)
+        if entry.action is A.member_role_update:
+            return await self.check_admin_role_given(entry)
+        if entry.action is A.role_update:
+            return await self.check_admin_perm_given(entry)
 
         actor = entry.user
-        if actor is None or not actor.bot or actor.id == self.bot.user.id or whitelisted(c, actor.id, "nuke"):
+        if actor is None or not actor.bot or actor.id == self.bot.user.id:
+            return
+        actor_member = guild.get_member(actor.id)
+        if is_wl(c, "nuke", actor.id, actor_member.roles if actor_member else []):
             return
         a, kind = entry.action, None
         if a is A.channel_delete:
@@ -688,6 +801,86 @@ class AntiSystemCog(commands.Cog):
         if member is None or member.id == self.bot.user.id or member.public_flags.verified_bot:
             return
         await self.nuke_trigger(guild, member, "unverified", inviter=inviter)
+
+    # ───────── คนเข้าเซิฟ: ไม่มีโปรไฟล์ / อายุบัญชีไม่ถึง 7 วัน ─────────
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        if member.bot:
+            return
+        guild = member.guild
+        c = load(guild.id)
+        if not c["nuke"]["enabled"] or is_wl(c, "nuke", member.id):
+            return
+        reasons = []
+        if member.avatar is None:
+            reasons.append("ไม่มีโปรไฟล์")
+        if discord.utils.utcnow() - member.created_at < MIN_ACCOUNT_AGE:
+            reasons.append("อายุบัญชีไม่ถึง 7 วัน")
+        if not reasons:
+            return
+        me = guild.me
+        if not me.guild_permissions.kick_members:
+            return
+        reason = " เเละ".join(reasons)
+        dm = discord.Embed(
+            description=(f"พี่ถูกเตะจากดิส **{guild.name}** (`{guild.id}`) เนื่องจาก{reason} "
+                         f"ซึ่งดิสนี้เปิดระบบป้องกันไว้ ไว้มีโอกาสเราค่อยเจอกันใหม่นะคะพี่ {E729}"),
+            color=WHITE, timestamp=discord.utils.utcnow())
+        dm.set_thumbnail(url=member.display_avatar.url)
+        dm.set_footer(text="ถูกเตะเมื่อ")
+        try:
+            await member.send(embed=dm)
+        except discord.HTTPException:
+            pass
+        try:
+            await member.kick(reason=f"anti nuke: {reason}")
+        except discord.HTTPException:
+            return
+        log_event(guild.id, member.id, "kick", reason)
+
+    # ───────── แจ้งแอดมิน: ให้ยศแอดมิน / เปิดสิทธิ์แอดมินให้ยศ ─────────
+    async def check_admin_role_given(self, entry: discord.AuditLogEntry):
+        guild, giver = entry.guild, entry.user
+        if giver is not None and giver.id == self.bot.user.id:
+            return
+        added = list(getattr(entry.after, "roles", None) or [])
+        roles = [r for r in (guild.get_role(x.id) for x in added) if r and r.permissions.administrator]
+        if not roles or entry.target is None:
+            return
+        target = entry.target
+        e = discord.Embed(
+            description=(f"# {E739} มีการให้ยศเเอดมิน {E739}\n\n"
+                         f"{E763} ยศที่ให้: {', '.join(r.name for r in roles)}\n\n"
+                         f"{E764} คนที่ให้: {giver.mention if giver else 'ไม่ทราบ'} ({giver.id if giver else '-'})\n\n"
+                         f"{E762} ให้กับ: <@{target.id}> ({target.id})\n\n"
+                         f"{E763} จากเซิฟ: {guild.name} ({guild.id})\n\n"
+                         "สิ่งที่เกิดขึ้น: ให้ยศที่มีสิทธิ์เเอดมินเเก่สมาชิก"),
+            color=WHITE, timestamp=discord.utils.utcnow())
+        e.set_thumbnail(url=(giver.display_avatar.url if giver else guild.me.display_avatar.url))
+        e.set_footer(text="ให้ยศเมื่อ")
+        await self.dm_admins(guild, e)
+
+    async def check_admin_perm_given(self, entry: discord.AuditLogEntry):
+        guild, giver = entry.guild, entry.user
+        if giver is not None and giver.id == self.bot.user.id:
+            return
+        try:
+            before, after = entry.before.permissions.administrator, entry.after.permissions.administrator
+        except AttributeError:
+            return
+        if before or not after or entry.target is None:
+            return
+        role = guild.get_role(entry.target.id)
+        e = discord.Embed(
+            description=(f"# {E739} มีการอนุญาตสิทธิ์เเอดมินให้ยศ {E739}\n\n"
+                         f"{E763} ยศที่ได้สิทธิ์เเอดมิน: {role.name if role else entry.target.id} ({entry.target.id})\n\n"
+                         f"{E764} คนที่ให้สิทธิ์: {giver.mention if giver else 'ไม่ทราบ'} ({giver.id if giver else '-'})\n\n"
+                         f"{E762} จากเซิฟ: {guild.name} ({guild.id})\n\n"
+                         "สิ่งที่เกิดขึ้น: เปิดสิทธิ์ Administrator ให้ยศนี้"),
+            color=WHITE, timestamp=discord.utils.utcnow())
+        e.set_thumbnail(url=(giver.display_avatar.url if giver else guild.me.display_avatar.url))
+        e.set_footer(text="เปลี่ยนสิทธิ์เมื่อ")
+        await self.dm_admins(guild, e)
 
     async def nuke_trigger(self, guild: discord.Guild, bot_user, kind: str, inviter=None):
         key = (guild.id, bot_user.id)
