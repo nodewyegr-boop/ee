@@ -19,7 +19,7 @@ async def update_status():
     await bot.wait_until_ready()
     total_members = sum(guild.member_count for guild in bot.guilds)
     total_guilds = len(bot.guilds)
-    activity = discord.Game(name=f"มีสมาชิก {total_members} คน | {total_guilds} เซิร์ฟเวอร์")
+    activity = discord.Game(name=f"สมาชิก {total_members} คน | {total_guilds} เซิร์ฟเวอร์")
     await bot.change_presence(activity=activity)
 
 
@@ -48,3 +48,20 @@ async def main():
     # โหลดทุก cog โดยถ้าไฟล์ไหนพัง (เช่นขาดไลบรารี) จะข้ามไฟล์นั้น บอทตัวอื่นยังทำงานต่อ
     for filename in sorted(os.listdir('./cogs')):
         if filename.endswith('.py') and not filename.startswith('_'):
+            try:
+                await bot.load_extension(f'cogs.{filename[:-3]}')
+                print(f"Loaded Cog: {filename[:-3]}")
+            except Exception:
+                print(f"!!! โหลด cog '{filename[:-3]}' ไม่สำเร็จ (ข้ามไป):")
+                traceback.print_exc()
+
+    keep_alive()
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        print("ERROR: DISCORD_TOKEN is missing!")
+        return
+    await bot.start(token)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
