@@ -583,7 +583,7 @@ class ForbiddenWordsCog(commands.Cog):
     async def cog_load(self):
         init_tables()
 
-    @app_commands.command(name="forbidden_words", description="antiคำบางคำ (แอดมินเท่านั้น)")
+    @app_commands.command(name="forbidden", description="antiคำบางคำ (แอดมินเท่านั้น)")
     @app_commands.guild_only()
     async def forbidden_words(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
