@@ -1272,13 +1272,13 @@ class WerewolfCog(commands.Cog):
         if p and g.state in ("day", "vote"):
             if not p.alive:
                 await delete()
-                return await warn("พี่ตายเเล้ว พิมพ์ไม่ได้น้า")
+                return await warn("คุณตายเเล้ว พิมพ์ไม่ได้น้า")
             if uid in g.silenced:
                 await delete()
-                return await warn("พี่โดนใบ้ พิมพ์ไม่ได้ตลอดวันนี้")
+                return await warn("คุณโดนใบ้ พิมพ์ไม่ได้ตลอดวันนี้")
             if uid in g.away:
                 await delete()
-                return await warn("พี่ออกจากหมู่บ้านอยู่ พิมพ์ไม่ได้ในวันนี้")
+                return await warn("คุณออกจากหมู่บ้านอยู่ พิมพ์ไม่ได้ในวันนี้")
 
 
 async def setup(bot: commands.Bot):
