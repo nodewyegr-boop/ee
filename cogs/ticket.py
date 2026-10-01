@@ -1,6 +1,7 @@
 import io
 import os
 import time
+from datetime import timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -35,6 +36,7 @@ E728 = "<a:1000035728:1554860189125967894>"
 DEFAULT_TITLE = f"{E725} ticket support {E725}"
 DEFAULT_DESC = (f"{E597} หากพี่ๆต้องการเเจ้งปัญหาหรือสิ่งต่างๆสามารถกดticket "
                 "พิมพ์สิ่งที่อยากจะเเจ้งให้พี่ๆเเอดมินได้เลยย")
+TH_TZ = timezone(timedelta(hours=7))  # เวลาไทย แสดงในไฟล์บันทึกโดยไม่ต้องมีคำว่า UTC
 PANEL_NAME = "╭・𝗧𝗶𝗰𝗸𝗲𝘁"
 LOG_NAME = "╰・𝗧𝗶𝗰𝗸𝗲𝘁𝘀𝗟𝗼𝗴𝘀"
 
@@ -305,7 +307,7 @@ class SetupView(AdminView):
                     me: bot_ow})
 
             log = guild.get_channel(cfg["log_channel_id"] or 0)
-            if log is None:  # ╰・TicketsLogs เห็นเเค่แอดมิน
+            if log is None:  # ╰・TicketsLogs เห็นเเค่แอดม
                 log = await guild.create_text_channel(LOG_NAME, category=category, overwrites={
                     guild.default_role: discord.PermissionOverwrite(view_channel=False), me: bot_ow})
 
@@ -425,11 +427,11 @@ CLOSING: set = set()
 
 def build_transcript(history: list, channel, guild, closer) -> str:
     fmt = "%Y-%m-%d %H:%M:%S"
-    out = ["=" * 42, f"      TICKET TRANSCRIPT ({channel.name})", "=" * 42,
+    out = [f"TICKET TRANSCRIPT ({channel.name})",
            f"Server: {guild.name} ({guild.id})", f"Closed By: {closer} ({closer.id})",
-           f"Closed At: {discord.utils.utcnow().strftime(fmt)} UTC", "=" * 42, ""]
+           f"Closed At: {discord.utils.utcnow().astimezone(TH_TZ).strftime(fmt)}", ""]
     for m in history:
-        out.append(f"[{m.created_at.strftime(fmt)}] {m.author} ({m.author.id}):")
+        out.append(f"[{m.created_at.astimezone(TH_TZ).strftime(fmt)}] {m.author} ({m.author.id}):")
         for ln in (m.content or "").split("\n") if m.content else []:
             out.append("  " + ln)
         for e in m.embeds:
@@ -460,7 +462,7 @@ class TicketCloseView(discord.ui.View):
         if channel.id in CLOSING:
             return await interaction.response.send_message(embed=emb("กำลังปิดอยู่น้าา รอแปปนึง"), ephemeral=True)
         CLOSING.add(channel.id)
-        await interaction.response.send_message(embed=emb(f"{E606} กำลังบันทึกบทสนทนาเเละปิด ticket..."))
+        await interaction.response.send_message(embed=emb(f"{E606} รอสักครู่"))
         try:
             row = q("SELECT number, opener_id, title, description, image_url FROM tk_tickets WHERE channel_id=?",
                     (channel.id,), one=True)
@@ -498,7 +500,7 @@ class TicketCloseView(discord.ui.View):
             await channel.delete(reason=f"ปิด ticket #{number} โดย {closer}")
         except discord.HTTPException:
             try:
-                await channel.send(embed=emb(f"{E790} ปิด ticket ไม่สำเร็จน้า เช็คสิทธิ์บอทเเล้วลองใหม่"))
+                await channel.send(embed=emb(f"{E790} ปิด ticket ไม่สำเร็จ เช็คสิทธิ์บอทเเล้วลองใหม่"))
             except discord.HTTPException:
                 pass
         finally:
