@@ -764,7 +764,7 @@ class AnonPanelView(discord.ui.View):
                 return await interaction.response.send_message(
                     embed=emb(f"{E725} ยังไม่มีประวัติเเชทของพี่เลยน้า"), ephemeral=True)
             return await interaction.response.send_message(
-                embed=emb(f"# {E725} ประวัติเเชท\n\nเลือกเเชทที่อยากดูในลิสด้านล่างได้เลย (เห็นเฉพาะเเชทของพี่เอง)"),
+                embed=emb(f"# {E725} ประวัติเเชท\n\nเลือกเเชทที่อยากดูในลิสด้านล่างได้เลย"),
                 view=HistoryView(rows, uid), ephemeral=True)
         await interaction.response.send_message(embed=emb(f"{E728} ล้างตัวเลือกสำเร็จจ"), ephemeral=True)
 
