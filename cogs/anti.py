@@ -611,7 +611,7 @@ class AntiSystemCog(commands.Cog):
     async def cog_load(self):
         init_tables()
 
-    @app_commands.command(name="anti_system", description="ระบบป้องกันต่างๆ (แอดมินเท่านั้น)")
+    @app_commands.command(name="anti", description="ระบบป้องกันต่างๆ (แอดมินเท่านั้น)")
     @app_commands.guild_only()
     async def anti_system(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
