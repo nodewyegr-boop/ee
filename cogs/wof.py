@@ -348,7 +348,7 @@ class Game:
                 text += "\n\n**เพื่อนฝ่ายหมาป่า:** " + " ".join(f"<@{u}>" for u in mates)
         if self.lovers and uid in self.lovers:
             other = self.lovers[1] if self.lovers[0] == uid else self.lovers[0]
-            text += f"\n\n{E804} **คนรักของพี่คือ** <@{other}> (ตายตามกัน)"
+            text += f"\n\n{E804} **คนรักของคุณคือ** <@{other}> (ตายตามกัน)"
         if p.converted:
             text += "\n\nคุณกลายเป็นฝ่ายหมาป่าเเล้ว!"
         if not p.alive:
@@ -376,7 +376,7 @@ class Game:
             return "wolf", c, 1, "ต้องการให้หมาป่าฆ่าใคร (ถ้าหมาป่าหลายตัวเลือกไม่ตรงกัน จะนับเสียงข้างมาก)"
         if p.role == "witch":
             if self.witch_used:
-                return None, [], 0, "พี่ใช้ความสามารถฆ่าไปเเล้ว (ได้ 1 ครั้งต่อเกม)"
+                return None, [], 0, "คุณใช้ความสามารถฆ่าไปเเล้ว (ได้ 1 ครั้งต่อเกม)"
             return "witch", others, 1, "ต้องการฆ่าใคร (ใช้ได้ครั้งเดียวทั้งเกม ถ้าไม่เลือกคืนนี้ก็ยังเก็บไว้ได้)"
         if p.role == "bodyguard":
             return "bodyguard", self.bodyguard_cands(uid), 1, (
@@ -385,9 +385,9 @@ class Game:
             return "mage", others, 1, "ต้องการร่ายเวทใบ้ใส่ใคร"
         if p.role == "cupid":
             if self.cupid_done:
-                return None, [], 0, "พี่ใช้ความสามารถคิวปิดไปเเล้ว (ได้ 1 คู่ต่อเกม)"
+                return None, [], 0, "คุณใช้ความสามารถคิวปิดไปเเล้ว (ได้ 1 คู่ต่อเกม)"
             if self.night_no != 1:
-                return None, [], 0, "พี่ใช้ความสามารถได้ในคืนที่ 1 เท่านั้น"
+                return None, [], 0, "คุณใช้ความสามารถได้ในคืนที่ 1 เท่านั้น"
             return "cupid", self.alive_ids(), 2, "เลือก 2 คนให้รักกัน"
         if p.role in ("seer", "aura"):
             left = MAX_LOOKS - p.looks
@@ -398,7 +398,7 @@ class Game:
             return p.role, others, 1, f"{what} (เหลือสิทธิ์ดูอีก {left}/{MAX_LOOKS} คน)"
         if p.role == "hag":
             return "hag", others, 1, "ต้องการให้ใครออกจากหมู่บ้าน"
-        return None, [], 0, "คืนนี้พี่ไม่มีความสามารถที่ต้องใช้ พักผ่อนรอเช้าได้เลย"
+        return None, [], 0, "คืนนี้คุณไม่มีความสามารถที่ต้องใช้ พักผ่อนรอเช้าได้เลย"
 
     async def record_action(self, interaction: discord.Interaction, uid: int, kind: str, targets: list):
         p = self.players.get(uid)
@@ -408,10 +408,10 @@ class Game:
         if kind in ("seer", "aura"):
             if uid in self.night_actions:
                 return await interaction.response.edit_message(
-                    embed=emb(f"{E790} คืนนี้พี่ดูไปเเล้วน้าา"), view=None)
+                    embed=emb(f"{E790} คืนนี้คุณดูไปเเล้วน้าา"), view=None)
             if p.looks >= MAX_LOOKS:
                 return await interaction.response.edit_message(
-                    embed=emb(f"{E790} พี่ดูครบ {MAX_LOOKS} คนเเล้วน้าา (ดูได้ {MAX_LOOKS} คนต่อทั้งเกม)"), view=None)
+                    embed=emb(f"{E790} คุณดูครบ {MAX_LOOKS} คนเเล้วน้าา (ดูได้ {MAX_LOOKS} คนต่อทั้งเกม)"), view=None)
         if kind == "bodyguard" and targets[0] not in self.bodyguard_cands(uid):
             return await interaction.response.edit_message(
                 embed=emb(f"{E790} ปกป้องคนเดิมซ้ำไม่ได้น้าา ต้องปกป้องให้ครบทุกคนก่อน"), view=None)
@@ -570,7 +570,7 @@ class Game:
             f"{E803} ในเกมนี้มีบทบาท\n\n" + "\n".join(lines) +
             f"\n\nผู้เล่น **{n}** คน เป็นหมาป่า **{counts.get('wolf', 0)}** คน"
             f"\nเวลาคุยตอนเช้า: **{day_seconds(n) // 60} นาที {day_seconds(n) % 60} วิ**"
-            f"\nกดปุ่มด้านล่าง หรือพิมพ์ `!check` เพื่อดูการ์ดของพี่ (ห้ามบอกบทบาทตัวเองนะ!)"),
+            f"\nกดปุ่มด้านล่าง หรือพิมพ์ `!check` เพื่อดูการ์ดของคุณ (ห้ามบอกบทบาทตัวเองนะ!)"),
             view=CardView(self))
 
     async def night(self, first: bool = False):
@@ -780,7 +780,7 @@ class CardView(discord.ui.View):
         p = g.players.get(interaction.user.id)
         if not p:
             return await interaction.response.send_message(
-                embed=emb(f"{E790} พี่ไม่ได้อยู่ในเกมนี้น้า"), ephemeral=True)
+                embed=emb(f"{E790} คุณไม่ได้อยู่ในเกมนี้น้า"), ephemeral=True)
         embed, view = g.card_embed(interaction.user.id), None
         if g.state == "night" and g.actions_open and p.alive:
             kind, cands, need, note = g.action_for(interaction.user.id)
@@ -863,7 +863,7 @@ class OwnCardView(discord.ui.View):
             return await interaction.response.send_message(embed=emb(f"{E790} ปุ่มนี้ของคนอื่นน้า"), ephemeral=True)
         g = self.game
         if interaction.user.id not in g.players:
-            return await interaction.response.send_message(embed=emb(f"{E790} พี่ไม่ได้อยู่ในเกมนี้น้า"), ephemeral=True)
+            return await interaction.response.send_message(embed=emb(f"{E790} คุณไม่ได้อยู่ในเกมนี้น้า"), ephemeral=True)
         if self.abilities:
             role = g.players[interaction.user.id].role
             name, _, desc, img = ROLES[role]
@@ -897,18 +897,18 @@ class LobbyView(discord.ui.View):
         if g.state != "lobby":
             return await interaction.response.send_message(embed=emb(f"{E790} เกมเริ่มไปเเล้วน้า"), ephemeral=True)
         if uid != g.host_id and uid not in g.invited:
-            return await interaction.response.send_message(embed=emb(f"{E790} พี่ไม่ได้ถูกชวนเข้าห้องนี้น้า"), ephemeral=True)
+            return await interaction.response.send_message(embed=emb(f"{E790} คุณไม่ได้ถูกชวนเข้าห้องนี้น้า"), ephemeral=True)
         if uid in g.joined:
-            return await interaction.response.send_message(embed=emb("พี่เข้าร่วมเเล้วน้าา รอเกมเริ่มได้เลย"), ephemeral=True)
+            return await interaction.response.send_message(embed=emb("คุณเข้าร่วมเเล้วน้าา รอเกมเริ่มได้เลย"), ephemeral=True)
         member = g.guild.get_member(uid)
         try:
             await member.add_roles(g.role, reason="werewolf: เข้าร่วม")
         except discord.HTTPException:
-            return await interaction.response.send_message(embed=emb(f"{E790} ให้ยศเข้าห้องไม่ได้ (ยศบอทไม่ถึง?)"), ephemeral=True)
+            return await interaction.response.send_message(embed=emb(f"{E790} ให้ยศเข้าห้องไม่ได้ (ยศบอทไม่ถึง)"), ephemeral=True)
         g.joined.append(uid)
         await self.refresh(interaction)
         await interaction.followup.send(embed=emb(
-            f"{E606} เข้าร่วมเเล้วน้าา! น้องจะสุ่มบทบาทให้ตอนเกมเริ่ม เเล้วพี่ดูการ์ดได้ที่ปุ่ม **ดูการ์ด** หรือพิมพ์ `!check`"),
+            f"{E606} เข้าร่วมเเล้วน้าา น้องจะสุ่มบทบาทให้ตอนเกมเริ่ม เเล้วดูการ์ดได้ที่ปุ่ม **ดูการ์ด** หรือพิมพ์ `!check`"),
             ephemeral=True)
         if len(g.joined) == len(g.invited) + 1:   # ครบทุกคนที่ชวน → เริ่มเลย
             g.start_event.set()
