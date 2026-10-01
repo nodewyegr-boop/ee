@@ -1,3 +1,4 @@
+import math
 import time
 from datetime import timedelta
 from typing import Optional
@@ -31,6 +32,7 @@ E760 = "<a:1000035760:1554908193174589581>"
 E786 = "<a:1000035786:1554968314135191682>"
 E729 = "<a:1000035729:1554863632528052315>"
 E725 = "<a:1000035725:1554844594175483904>"
+E608 = "<a:1000035608:1554844998506123274>"
 E741 = "<a:1000035741:1554876169017499658>"
 E742 = "<a:1000035742:1554876309790793908>"
 E743 = "<a:1000035743:1554882610134524034>"
@@ -74,6 +76,10 @@ def init_tables():
     q("""CREATE TABLE IF NOT EXISTS fw_exempt (
         guild_id INTEGER, kind TEXT, target_id INTEGER,
         PRIMARY KEY (guild_id, kind, target_id))""")
+    q("""CREATE TABLE IF NOT EXISTS fw_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, user_id INTEGER,
+        kind TEXT, word TEXT, extra INTEGER DEFAULT 0, created_at INTEGER)""")
+    q("CREATE INDEX IF NOT EXISTS idx_fw_log ON fw_log (guild_id, kind, created_at)")
     q("""CREATE TABLE IF NOT EXISTS fw_warns (
         guild_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0,
         PRIMARY KEY (guild_id, user_id))""")
@@ -155,6 +161,12 @@ def add_warn(gid: int, uid: int) -> int:
     return q("SELECT count FROM fw_warns WHERE guild_id=? AND user_id=?", (gid, uid), one=True)[0]
 
 
+def log_event(gid: int, uid: int, kind: str, word: str, extra: int = 0):
+    """บันทึกประวัติ kind = warn / kick / ban / timeout"""
+    q("INSERT INTO fw_log (guild_id, user_id, kind, word, extra, created_at) VALUES (?,?,?,?,?,?)",
+      (gid, uid, kind, word, extra, int(time.time())))
+
+
 def reset_warn(gid: int, uid: int):
     q("DELETE FROM fw_warns WHERE guild_id=? AND user_id=?", (gid, uid))
 
@@ -182,10 +194,14 @@ class AdminView(discord.ui.View):
         return True
 
 
-async def finish_modal(interaction: discord.Interaction, parent: discord.ui.View, embed: discord.Embed):
-    """รีเซ็ตเมนูเดิม แล้วส่งผลลัพธ์แบบเห็นคนเดียว"""
+async def finish_modal(interaction: discord.Interaction, parent: discord.ui.View, embed: discord.Embed,
+                       refresh: Optional[discord.Embed] = None):
+    """รีเซ็ตเมนูเดิม (และอัปเดตแผงถ้าส่ง refresh มา) แล้วส่งผลลัพธ์แบบเห็นคนเดียว"""
     try:
-        await interaction.response.edit_message(view=parent)
+        if refresh is not None:
+            await interaction.response.edit_message(embed=refresh, view=parent)
+        else:
+            await interaction.response.edit_message(view=parent)
     except discord.HTTPException:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
@@ -263,7 +279,8 @@ class KickBanModal(discord.ui.Modal):
         set_mode(interaction.guild.id, self.kind, n, 0, "", interaction.user.id)
         name = MODE_NAME[self.kind]
         tail = f"เตือน **{n}** ครั้งก่อน{name}" if n else f"{name}ทันทีเมื่อพิมพ์คำต้องห้าม"
-        await finish_modal(interaction, self.parent, emb(f"{E725} พี่เซ็ตระบบ{name}เเล้วน้าา {tail}"))
+        await finish_modal(interaction, self.parent, emb(f"{E725} พี่เซ็ตระบบ{name}เเล้วน้าา {tail}"),
+                           refresh=mode_embed(interaction.guild))
 
 
 class WarnModal(discord.ui.Modal, title="ตั้งระบบเตือน"):
@@ -281,7 +298,8 @@ class WarnModal(discord.ui.Modal, title="ตั้งระบบเตือน
         set_mode(interaction.guild.id, "warn", 0, 0, t, interaction.user.id)
         shown = f"\nคำเตือน: {t}" if t else "\nใช้ข้อความเดิมของบอท"
         await finish_modal(interaction, self.parent,
-                           emb(f"{E725} พี่เซ็ตระบบเตือนเเล้วน้าา (ลบข้อความ + เตือนเฉยๆ ไม่เตะไม่เเบน){shown}"))
+                           emb(f"{E725} พี่เซ็ตระบบเตือนเเล้วน้าา (ลบข้อความ + เตือนเฉยๆ ไม่เตะไม่เเบน){shown}"),
+                           refresh=mode_embed(interaction.guild))
 
 
 class TimeoutModal(discord.ui.Modal, title="ตั้งระบบหมดเวลา"):
@@ -305,24 +323,29 @@ class TimeoutModal(discord.ui.Modal, title="ตั้งระบบหมดเ
             f"{E725} พี่เซ็ตระบบหมดเวลาเเล้วน้าา หมดเวลาไป **{m}** นาที\n"
             f"ถ้าเป็นชั่วโมงจะเท่ากับ: {round(m / 60, 2):g}\n"
             f"ถ้าเป็นวัน: {round(m / 1440, 2):g}"
-            + (f"\nเตือนก่อน **{n}** ครั้ง" if n else "")))
+            + (f"\nเตือนก่อน **{n}** ครั้ง" if n else "")),
+            refresh=mode_embed(interaction.guild))
+
+
+def info_lines(st: dict):
+    """บล็อก 'ระบบเดิมตอนนี้' + 'สถานะตอนนี้' ใช้ซ้ำทั้งแผงหลักและหน้าเซ็ตระบบ"""
+    who = f"<@{st['set_by']}>" if st["set_by"] else "ไม่มี"
+    info = f"{E760} ระบบเดิมตอนนี้คือ : **{MODE_NAME[st['mode']]}**\nเซ็ตโดย : {who}"
+    if st["mode"] in ("kick", "ban", "timeout"):
+        info += f"\nเตือนทั้งหมด: {st['limit']} ครั้ง"
+    if st["mode"] == "timeout":
+        info += f"\nหมดเวลา: {st['timeout']} นาที"
+    by = f" ({'เปิด' if st['enabled'] else 'ปิด'}โดย <@{st['status_by']}>)" if st["status_by"] else ""
+    status = f"{E741} สถานะตอนนี้: " + (f"เปิด {E742}" if st["enabled"] else f"ปิด {E743}") + by
+    return info, status
 
 
 def mode_embed(guild: discord.Guild) -> discord.Embed:
-    st = load(guild.id)
-    who = f"<@{st['set_by']}>" if st["set_by"] else "ไม่มี"
-    lines = [
+    info, status = info_lines(load(guild.id))
+    return emb("\n\n".join([
         f"# เลือกระบบเตะ เเบน เตือน {E767}",
         f"{E757} ให้พี่ๆเลือกระบบ ว่าจะให้น้อง เตือน/หมดเวลา หรือ เตะ หรือ เเบนคนเลยเมื่อมีคนพิมพ์คำต้องห้าม",
-        f"{E760} ระบบเดิมตอนนี้คือ : **{MODE_NAME[st['mode']]}**\nเซ็ตโดย : {who}",
-    ]
-    if st["mode"] in ("kick", "ban", "timeout"):
-        lines[-1] += f"\nเตือนทั้งหมด: {st['limit']} ครั้ง"
-    if st["mode"] == "timeout":
-        lines[-1] += f"\nหมดเวลา: {st['timeout']} นาที"
-    by = f" ({'เปิด' if st['enabled'] else 'ปิด'}โดย <@{st['status_by']}>)" if st["status_by"] else ""
-    lines.append(f"{E741} สถานะตอนนี้: " + (f"เปิด {E742}" if st["enabled"] else f"ปิด {E743}") + by)
-    return emb("\n\n".join(lines))
+        info, status]))
 
 
 class ModeView(AdminView):
@@ -399,8 +422,8 @@ class PreventView(AdminView):
 
 
 # ---- เมนูหลัก ----
-def main_embed() -> discord.Embed:
-    return emb(
+def _main_text() -> str:
+    return (
         f"# anti คำต้องห้าม {E_TITLE}\n\n"
         f"{E793} คำสั่งนี้ จะantiคำที่แอดมินเซ็ตไว้ เช่น พ่อมึงตาย ถึงจะไม่ได้พิมพ์พ่อมึงตายโดยตรง "
         "เเต่ถ้าในประโยคมีคำนั้นเช่น ไอ้หน้าหีพ่อมึงตาย เเค่มีคำนั้นในประโยคก็สามารถโดนได้ "
@@ -411,6 +434,78 @@ def main_embed() -> discord.Embed:
         "โดยใช้เครื่องหมาย , ในการคั้นได้เลยย รวมถึงการลบคำก็ด้วยย")
 
 
+def main_embed(gid: int) -> discord.Embed:
+    info, status = info_lines(load(gid))
+    return emb(_main_text() + "\n\n" + info + "\n\n" + status)
+
+
+# ---- ประวัติการโดนเตือน/เตะ/เเบน/หมดเวลา ----
+KINDS = ["warn", "ban", "kick", "timeout"]
+KIND_TITLE = {"warn": "รายชื่อผู้ถูกบอทเตือน", "ban": "รายชื่อผู้ถูกเเบน",
+              "kick": "รายชื่อผู้ถูกเตะ", "timeout": "รายชื่อผู้ถูกหมดเวลา"}
+KIND_SHORT = {"warn": "เตือน", "ban": "เเบน", "kick": "เตะ", "timeout": "หมดเวลา"}
+PAGE_SIZE = 50
+
+
+def log_embeds(guild_id: int, kind: str, page: int, avatar_url: str):
+    total = q("SELECT COUNT(*) FROM fw_log WHERE guild_id=? AND kind=?", (guild_id, kind), one=True)[0]
+    pages = max(1, math.ceil(total / PAGE_SIZE))
+    rows = q("SELECT user_id, word, extra, created_at FROM fw_log WHERE guild_id=? AND kind=? "
+             "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+             (guild_id, kind, PAGE_SIZE, page * PAGE_SIZE), many=True)
+    head = (f"# {KIND_TITLE[kind]} {E608}\n\n"
+            f"{E603} หากต้องการดูรายชื่อผู้ถูกเเบน เตะ หมดเวลา โปรดกดปุ่มด้านล่าง\n\n")
+    if total == 0:
+        chunks = [f"ยังไม่มีคนโดน{KIND_SHORT[kind]}เยยย"]
+    elif not rows:
+        chunks = ["ยังไม่ถึงหน้านี้น้าา"]
+    else:
+        lines = []
+        for uid, word, extra, ts in rows:
+            w = word if len(word) <= 20 else word[:20] + "…"
+            w = w.replace("`", "'")
+            line = f"<@{uid}> เนื่องจากพิมพ์คำว่า `{w}` เมื่อเวลา <t:{ts}:f>"
+            if kind == "timeout" and extra:
+                line += f" ({extra} นาที)"
+            lines.append(line)
+        # แบ่ง 2 embed ต่อหน้า (ลิมิตตัวอักษรของ embed)
+        chunks = ["\n".join(lines[:25])] + (["\n".join(lines[25:])] if len(lines) > 25 else [])
+
+    embeds = []
+    for i, c in enumerate(chunks):
+        e = emb((head if i == 0 else "") + c)
+        if i == 0:
+            e.set_thumbnail(url=avatar_url)
+        embeds.append(e)
+    embeds[-1].set_footer(text=f"หน้า {page + 1}/{pages} • ทั้งหมด {total} รายการ")
+    return embeds
+
+
+class LogView(AdminView):
+    def __init__(self, owner_id: int, kind_i: int = 0, page: int = 0):
+        super().__init__(owner_id)
+        self.kind_i, self.page = kind_i, page
+        prev_b = discord.ui.Button(emoji="◀️", style=discord.ButtonStyle.secondary, row=0, disabled=page <= 0)
+        next_b = discord.ui.Button(emoji="▶️", style=discord.ButtonStyle.secondary, row=0)
+        back_b = discord.ui.Button(
+            label=f"กลับหน้า{KIND_SHORT[KINDS[kind_i - 1]]}" if kind_i > 0 else "กลับ",
+            emoji="⏪", style=discord.ButtonStyle.primary, row=1, disabled=kind_i == 0)
+        fwd_b = discord.ui.Button(
+            label=f"ไปหน้า{KIND_SHORT[KINDS[kind_i + 1]]}" if kind_i < len(KINDS) - 1 else "สุดเเล้ว",
+            emoji="⏩", style=discord.ButtonStyle.primary, row=1, disabled=kind_i == len(KINDS) - 1)
+        prev_b.callback = lambda i: self.go(i, self.kind_i, max(0, self.page - 1))
+        next_b.callback = lambda i: self.go(i, self.kind_i, self.page + 1)
+        back_b.callback = lambda i: self.go(i, self.kind_i - 1, 0)
+        fwd_b.callback = lambda i: self.go(i, self.kind_i + 1, 0)
+        for b in (prev_b, next_b, back_b, fwd_b):
+            self.add_item(b)
+
+    async def go(self, interaction: discord.Interaction, kind_i: int, page: int):
+        embeds = log_embeds(interaction.guild.id, KINDS[kind_i], page,
+                            interaction.client.user.display_avatar.url)
+        await interaction.response.edit_message(embeds=embeds, view=LogView(self.owner_id, kind_i, page))
+
+
 class MainView(AdminView):
     def __init__(self, owner_id: int, enabled: bool = False):
         super().__init__(owner_id)
@@ -418,6 +513,7 @@ class MainView(AdminView):
             discord.SelectOption(label="antiคำ", value="add", emoji=pe(E727)),
             discord.SelectOption(label="ลบคำที่anti", value="remove", emoji=pe(E726)),
             discord.SelectOption(label="เช็คคำต้องห้าม", value="list", emoji=pe(E740)),
+            discord.SelectOption(label="เช็คการโดนตักเตือน เตะ เเบน หมดเวลา", value="history", emoji=pe(E603)),
             discord.SelectOption(label="เซ็ต เตะ/เเบน/เตือน/หมดเวลา", value="mode", emoji=pe(E762)),
             discord.SelectOption(label="prevent คน/ช่อง/หมวดหมู่", value="prevent", emoji=pe(E793)),
             discord.SelectOption(label="ปิด" if enabled else "เปิด", value="toggle",
@@ -439,7 +535,7 @@ class MainView(AdminView):
             on = not load(guild.id)["enabled"]
             set_enabled(guild.id, on, interaction.user.id)
             # สร้างเมนูใหม่ ให้ตัวเลือกสลับเป็น เปิด <-> ปิด
-            await interaction.response.edit_message(view=MainView(self.owner_id, on))
+            await interaction.response.edit_message(embed=main_embed(guild.id), view=MainView(self.owner_id, on))
             if on:
                 st = load(guild.id)
                 n = (str(st["limit"]) if st["limit"] else "0 (ลงโทษทันที)") \
@@ -468,6 +564,9 @@ class MainView(AdminView):
                 e = emb(f"# {E764} คำต้องห้ามทั้งหมด\n\n" + "\n\n".join(parts))
             e.set_thumbnail(url=interaction.client.user.display_avatar.url)
             await send(embed=e)
+        elif v == "history":
+            await send(embeds=log_embeds(guild.id, "warn", 0, interaction.client.user.display_avatar.url),
+                       view=LogView(interaction.user.id))
         elif v == "mode":
             await send(embed=mode_embed(guild), view=ModeView(interaction.user.id))
         elif v == "prevent":
@@ -491,7 +590,7 @@ class ForbiddenWordsCog(commands.Cog):
             return await interaction.response.send_message(
                 embed=emb(f"{E790} ไม่ได้น้าา พี่ไม่ใช่แอดมิน"), ephemeral=True)
         await interaction.response.send_message(
-            embed=main_embed(), view=MainView(interaction.user.id, bool(load(interaction.guild.id)["enabled"])),
+            embed=main_embed(interaction.guild.id), view=MainView(interaction.user.id, bool(load(interaction.guild.id)["enabled"])),
             ephemeral=True)
 
     @commands.Cog.listener()
@@ -536,18 +635,22 @@ class ForbiddenWordsCog(commands.Cog):
             if limit > 0:
                 n = add_warn(guild.id, member.id)
                 if n <= limit:
+                    log_event(guild.id, member.id, "warn", hit)
                     return await say(
                         f"{E790} {member.mention} พี่พิมพ์คำนี้ไม่ได้น้าาา ({hit}) พี่เหลือโอกาสอีก {limit - n} ครั้ง")
             if await self.punish(member, mode, st, hit):
                 reset_warn(guild.id, member.id)
+                log_event(guild.id, member.id, mode, hit, st["timeout"] if mode == "timeout" else 0)
                 return
             # ลงโทษไม่ได้ (ยศบอทไม่ถึง/ไม่มีสิทธิ์) → เตือนธรรมดา
         elif mode == "warn" and st["warn_text"]:
             t = st["warn_text"]
             if "{user}" not in t:
                 t = "{user} " + t
+            log_event(guild.id, member.id, "warn", hit)
             return await say(t.replace("{user}", member.mention).replace("{word}", hit))
 
+        log_event(guild.id, member.id, "warn", hit)
         await say(f"{E790} {member.mention} พี่พิมพ์คำนี้ไม่ได้น้าาา ({hit})")
 
     async def punish(self, member: discord.Member, mode: str, st: dict, hit: str) -> bool:
