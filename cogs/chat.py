@@ -12,7 +12,11 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont, features
+try:
+    from PIL import Image, ImageDraw, ImageFont, features
+    PIL_OK = True
+except Exception:          # ยังไม่ได้ติดตั้ง Pillow → ใช้โหมดข้อความแทน ไม่ให้บอทล่ม
+    PIL_OK = False
 
 from database import db
 
@@ -21,8 +25,8 @@ REPORT_CHANNEL_ID = 1488557048223240385   # ห้องที่รับรา
 REPORT_COOLDOWN = 3600                    # แจ้งได้ 1 ครั้งต่อ 1 ชั่วโมง
 CONFIRM_SECONDS = 180                     # ต้องกดยืนยันแชทภายใน 3 นาที
 MAX_MSG_LEN = 500
-BANNED_TEXT = ("โดนเเบนจากระบบนี้เเล้วน้า เเล้วจะเรื้อนทำไมล่ะ "
-               "ถ้าคิดว่าโดนเเบนผิด ไปติดต่อเเอดมินขอปลดเเบนได้เลย")  # แก้ข้อความนี้ได้
+BANNED_TEXT = ("โดนเเบน มึงจะเรื้อนหาเหี้ยอะไร "
+               "ถ้าคิดว่าโดนเเบนผิด ไปติดต่อเเอดมินขอปลดเเบนได้")  # แก้ข้อความนี้ได้
 
 PANEL_IMG = ("https://cdn.discordapp.com/attachments/1541161566584578090/1555308379482624020/"
              "855e39df58a027b1578ab4e9a0ba2e59.jpg?backend=b2&ex=6ac00d4d&is=6abebbcd&hm="
@@ -245,6 +249,39 @@ def render(chat_id: str, msgs: list, page: int):
     return buf, len(pages), page
 
 
+USE_IMAGE = False   # ตั้งตอนโหลด cog (ดู cog_load)
+
+
+def render_text(chat_id: str, msgs: list, page: int):
+    """โหมดข้อความ: คืน (ข้อความ, จำนวนหน้า, หน้าที่แสดงจริง)"""
+    blocks = []
+    for role, text, ts in msgs:
+        body = "\n".join("> " + ln for ln in text.split("\n"))
+        blocks.append(f"> **[{ROLE_TH[role]}]**\n{body}\n> -# {hhmm(ts)}")
+    pages, size = [[]], 0
+    for b in blocks:
+        if pages[-1] and size + len(b) + 2 > 3300:
+            pages.append([])
+            size = 0
+        pages[-1].append(b)
+        size += len(b) + 2
+    page = max(0, min(page, len(pages) - 1))
+    body = "\n\n".join(pages[page]) if pages[page] else "*ยังไม่มีข้อความ*"
+    return f"**ID: {chat_id}**\n\n{body}\n\n-# หน้า {page + 1}/{len(pages)}", len(pages), page
+
+
+def build_page(chat_id: str, msgs: list, page: int, footer: str = ""):
+    """คืน (embed, files, จำนวนหน้า, หน้าที่แสดงจริง) ใช้ภาพถ้าพร้อม ไม่งั้นใช้ข้อความ"""
+    if USE_IMAGE:
+        buf, total, page = render(chat_id, msgs, page)
+        return chat_embed(footer), [discord.File(buf, "chat.png")], total, page
+    text, total, page = render_text(chat_id, msgs, page)
+    e = emb(text)
+    if footer:
+        e.set_footer(text=footer)
+    return e, [], total, page
+
+
 # ═════════════ สถานะแชท (หน่วยความจำ) ═════════════
 QUEUES = {"venter": [], "listener": []}
 SEARCHING: dict = {}      # uid -> {"role", "msg", "user"}
@@ -280,18 +317,17 @@ def chat_embed(footer: str = "") -> discord.Embed:
 
 
 async def push(chat: Chat, uid: int, final: bool = False):
-    """ส่งภาพแชทล่าสุดเป็นข้อความใหม่ใน DM (ให้มีแจ้งเตือน) แล้วลบข้อความเก่า"""
-    total_before = render(chat.id, chat.msgs, 10 ** 6)[1]
+    """ส่งหน้าแชทล่าสุดเป็นข้อความใหม่ใน DM (ให้มีแจ้งเตือน) แล้วลบข้อความเก่า"""
+    total_before = build_page(chat.id, chat.msgs, 10 ** 6)[2]
     if chat.follow.get(uid, True):
         chat.page[uid] = total_before - 1
-    buf, total, page = render(chat.id, chat.msgs, chat.page.get(uid, 0))
+    footer = f"แชทจบเเล้ว • ID {chat.id} (ใช้ ID นี้ดูประวัติ/รายงานได้)" if final else ""
+    embed, files, total, page = build_page(chat.id, chat.msgs, chat.page.get(uid, 0), footer)
     chat.page[uid] = page
     view = None if final else ChatView(chat, uid, page, total)
-    footer = f"แชทจบเเล้ว • ID {chat.id} (ใช้ ID นี้ดูประวัติ/รายงานได้)" if final else ""
     old = chat.dm.get(uid)
     try:
-        chat.dm[uid] = await chat.users[uid].send(
-            embed=chat_embed(footer), file=discord.File(buf, "chat.png"), view=view)
+        chat.dm[uid] = await chat.users[uid].send(embed=embed, files=files, view=view)
     except discord.HTTPException:
         return
     if old:
@@ -397,10 +433,10 @@ class ChatView(discord.ui.View):
 
     async def _go(self, interaction: discord.Interaction, delta: int):
         c = self.chat
-        buf, total, page = render(c.id, c.msgs, c.page[self.uid] + delta)
+        embed, files, total, page = build_page(c.id, c.msgs, c.page[self.uid] + delta)
         c.page[self.uid], c.follow[self.uid] = page, page == total - 1
         await interaction.response.edit_message(
-            embed=chat_embed(), attachments=[discord.File(buf, "chat.png")], view=ChatView(c, self.uid, page, total))
+            embed=embed, attachments=files, view=ChatView(c, self.uid, page, total))
 
     async def prev(self, interaction: discord.Interaction):
         await self._go(interaction, -1)
@@ -625,9 +661,9 @@ class HistoryPage(discord.ui.View):
         self.add_item(nx)
 
     async def go(self, interaction: discord.Interaction, page: int):
-        buf, total, page = render(self.chat_id, load_msgs(self.chat_id), page)
+        embed, files, total, page = build_page(self.chat_id, load_msgs(self.chat_id), page)
         await interaction.response.edit_message(
-            embed=chat_embed(), attachments=[discord.File(buf, "chat.png")], view=HistoryPage(self.chat_id, page, total))
+            embed=embed, attachments=files, view=HistoryPage(self.chat_id, page, total))
 
 
 class HistoryView(discord.ui.View):
@@ -650,9 +686,9 @@ class HistoryView(discord.ui.View):
                (cid, self.uid, self.uid), one=True)
         if not ok:
             return await interaction.response.send_message(embed=emb(f"{E790} ไม่พบเเชทนี้ในประวัติของพี่น้า"), ephemeral=True)
-        buf, total, page = render(cid, load_msgs(cid), 0)
+        embed, files, total, page = build_page(cid, load_msgs(cid), 0)
         await interaction.response.send_message(
-            embed=chat_embed(), file=discord.File(buf, "chat.png"), view=HistoryPage(cid, page, total), ephemeral=True)
+            embed=embed, files=files, view=HistoryPage(cid, page, total), ephemeral=True)
 
 
 class ReportModal(discord.ui.Modal, title="รายงานเเชท"):
@@ -739,8 +775,14 @@ class AnonymousChatCog(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
+        global USE_IMAGE
         init_tables()
-        find_font()
+        USE_IMAGE = PIL_OK and find_font() is not None
+        if USE_IMAGE:
+            print("[anonymous_chat] โหมดภาพ (Pillow + ฟอนต์ไทยพร้อมใช้งาน)")
+        else:
+            print("[anonymous_chat] โหมดข้อความ — ถ้าอยากได้ภาพพื้นดำตัวหนังสือชมพู ให้เพิ่ม Pillow ใน "
+                  "requirements.txt และวางฟอนต์ไทยไว้ที่ fonts/")
         self.bot.add_view(AnonPanelView())
 
     @app_commands.command(name="anonymous_chat", description="ระบบคุยกันแบบไม่ระบุตัวตน (แอดมินเท่านั้น)")
@@ -807,14 +849,12 @@ class AnonymousChatCog(commands.Cog):
             info = emb(f"# เเชท {cid}\n\n**ผู้ระบาย** <@{row[0]}> id({row[0]})\n**ผู้รับฟัง** <@{row[1]}> id({row[1]})\n"
                        f"**สถานะ** {row[2]} • **ข้อความ** {len(msgs)}\n\n"
                        "เเบนได้ด้วย `!banid <id คน>` ปลดเเบนด้วย `!unban <id คน>`")
-            files, page, total = [], 0, 1
-            while page < total:
-                buf, total, _ = render(cid, msgs, page)
-                files.append(discord.File(buf, f"chat-{cid}-{page + 1}.png"))
-                page += 1
             await message.reply(embed=info, mention_author=False)
-            for i in range(0, len(files), 10):
-                await message.channel.send(files=files[i:i + 10])
+            page, total = 0, 1
+            while page < total and page < 10:     # สูงสุด 10 หน้าต่อครั้ง
+                embed, files, total, _ = build_page(cid, msgs, page)
+                await message.channel.send(embed=embed, files=files)
+                page += 1
         elif cmd in ("!banid", "!unban"):
             if not arg.isdigit():
                 return await message.reply(embed=emb(f"{E790} ใช้เเบบนี้: `{cmd} <id คน>`"), mention_author=False)
