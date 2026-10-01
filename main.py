@@ -18,7 +18,7 @@ async def update_status():
     await bot.wait_until_ready()
     total_members = sum(guild.member_count for guild in bot.guilds)
     total_guilds = len(bot.guilds)
-    activity = discord.Game(name=f"มีสมาชิก {total_members} คน | {total_guilds} เซิร์ฟเวอร์")
+    activity = discord.Game(name=f"สมาชิก {total_members} คน | {total_guilds} เซิร์ฟเวอร์")
     await bot.change_presence(activity=activity)
 
 
