@@ -149,7 +149,7 @@ class BackupCog(commands.Cog):
         except Exception as e:
             print(f"[backup] สำรองไม่สำเร็จ: {e}")
 
-    @app_commands.command(name="backup_now", description="สำรองข้อมูลทันที (เจ้าของบอทเท่านั้น)")
+    @app_commands.command(name="backup", description="สำรองข้อมูลทันที (เจ้าของบอทเท่านั้น)")
     async def backup_now(self, interaction: discord.Interaction):
         if not await self.bot.is_owner(interaction.user):
             return await interaction.response.send_message(embed=emb("ไม่ได้น้าา เฉพาะเจ้าของบอทเท่านั้น"), ephemeral=True)
