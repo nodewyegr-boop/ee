@@ -1,5 +1,6 @@
 import os
 import asyncio
+import traceback
 import discord
 from discord.ext import commands, tasks
 from keep_alive import keep_alive
@@ -8,7 +9,7 @@ from cogs.verify import NumberVerifyView, Button3SecVerifyView, AnimalVerifyView
 intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
-intents.message_content = True  # ให้ /log อ่านเนื้อหาข้อความที่ถูกลบได้ (ต้องเปิดใน Developer Portal ด้วย)
+intents.message_content = True  # ให้ระบบ log / anti / เกม อ่านเนื้อหาข้อความได้ (ต้องเปิดใน Developer Portal ด้วย)
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -18,7 +19,7 @@ async def update_status():
     await bot.wait_until_ready()
     total_members = sum(guild.member_count for guild in bot.guilds)
     total_guilds = len(bot.guilds)
-    activity = discord.Game(name=f"สมาชิก {total_members} คน | {total_guilds} เซิร์ฟเวอร์")
+    activity = discord.Game(name=f"มีสมาชิก {total_members} คน | {total_guilds} เซิร์ฟเวอร์")
     await bot.change_presence(activity=activity)
 
 
@@ -44,18 +45,6 @@ async def on_ready():
 
 
 async def main():
-    for filename in os.listdir('./cogs'):
-        if filename.endswith('.py'):
-            await bot.load_extension(f'cogs.{filename[:-3]}')
-            print(f"Loaded Cog: {filename[:-3]}")
-
-    keep_alive()
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        print("ERROR: DISCORD_TOKEN is missing!")
-        return
-    await bot.start(token)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    # โหลดทุก cog โดยถ้าไฟล์ไหนพัง (เช่นขาดไลบรารี) จะข้ามไฟล์นั้น บอทตัวอื่นยังทำงานต่อ
+    for filename in sorted(os.listdir('./cogs')):
+        if filename.endswith('.py') and not filename.startswith('_'):
