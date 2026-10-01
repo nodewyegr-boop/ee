@@ -42,11 +42,12 @@ LOG_NAME = "╰• Log Game Werewolf"
 MIN_PLAYERS = 5
 LOBBY_SECONDS = 300      # รอคนกดเข้าร่วม 5 นาที
 NIGHT0_SECONDS = 30      # คืนแรก (เตรียมตัว ไม่มีอะไร)
-NIGHT_SECONDS = 60       # ตอนมืดปกติ
+NIGHT_SECONDS = 30       # ตอนมืดปกติ
 VOTE_SECONDS = 60        # เวลาโหวต
 GAME_LIMIT = 3600        # ห้องเล่นได้ 1 ชั่วโมง
 CLOSE_AFTER = 300        # หลังจบเกมอยู่ในห้องต่ออีก 5 นาที
 IMG_STRIKES = 3          # ส่งรูปครบกี่ครั้งถึงโดนลบออกจากเกม
+MAX_LOOKS = 3            # เซียร์/ออร่า ดูได้กี่คนต่อทั้งเกม
 
 
 def day_seconds(n: int) -> int:
@@ -75,18 +76,25 @@ def wolves_for(n: int) -> int:
     return 8
 
 
-HUMAN_ORDER = ["seer", "bodyguard", "mage", "cupid", "mayor", "prince", "half_wolf", "infected",
-               "aura", "hag", "cowboy", "seer", "bodyguard", "mage", "half_wolf"]
+# บทบาทพิเศษฝั่งมนุษย์ที่สุ่มเข้าเกม (ไม่ซ้ำก่อน ถ้าคนเยอะจนบทบาทไม่พอค่อยสุ่มซ้ำจากกลุ่ม EXTRA)
+SPECIAL_POOL = ["seer", "bodyguard", "mage", "cupid", "mayor", "prince", "half_wolf", "infected",
+                "aura", "hag", "cowboy"]
+EXTRA_POOL = ["seer", "bodyguard", "mage", "half_wolf"]
 
 
 def compose(n: int) -> list:
-    """จัดบทบาทตามจำนวนผู้เล่น (ชาวบ้านอย่างน้อย 2 เสมอ, แม่มดเริ่มมีตั้งแต่ 14 คน)"""
-    w = wolves_for(n)
+    """สุ่มบทบาทตามจำนวนผู้เล่น (มีหมาป่าเเละชาวบ้านอย่างน้อย 2 เสมอ, เเม่มดเริ่มมีตั้งเเต่ 14 คน)"""
+    w = max(1, wolves_for(n))
     witch = 1 if n >= 14 else 0
     humans = n - w - witch
-    specials = max(0, min(len(HUMAN_ORDER), humans - 2))
-    roles = ["wolf"] * w + ["witch"] * witch + HUMAN_ORDER[:specials]
-    return roles + ["villager"] * (n - len(roles))
+    specials = max(0, min(len(SPECIAL_POOL) + len(EXTRA_POOL), humans - 2))
+    pool = random.sample(SPECIAL_POOL, min(specials, len(SPECIAL_POOL)))
+    if specials > len(SPECIAL_POOL):
+        pool += random.sample(EXTRA_POOL, specials - len(SPECIAL_POOL))
+    roles = ["wolf"] * w + ["witch"] * witch + pool
+    roles += ["villager"] * (n - len(roles))
+    random.shuffle(roles)
+    return roles
 
 
 IMG = "https://cdn.discordapp.com/attachments/1555167748865392701/"
@@ -185,11 +193,13 @@ HOSTS: dict = {}   # (guild_id, host_id) -> channel_id
 
 
 class Player:
-    __slots__ = ("uid", "role", "alive", "strikes", "converted", "revealed")
+    __slots__ = ("uid", "role", "alive", "strikes", "converted", "revealed", "protected", "looks")
 
     def __init__(self, uid: int, role: str):
         self.uid, self.role = uid, role
         self.alive, self.strikes, self.converted, self.revealed = True, 0, False, False
+        self.protected: set = set()   # บอดี้การ์ด: คนที่เคยปกป้องในรอบนี้ (ครบทุกคนแล้วรีเซ็ต)
+        self.looks = 0                # เซียร์/ออร่า: จำนวนครั้งที่ดูไปแล้วทั้งเกม
 
 
 def team_of(role: str) -> str:
@@ -235,6 +245,25 @@ class Game:
 
     def alive_ids(self) -> list:
         return [u for u, p in self.players.items() if p.alive]
+
+    def skip_need(self) -> int:
+        """จำนวนโหวตข้ามที่ต้องใช้ ลดลงตามจำนวนคนที่เหลือ (คนที่เหลือกดครบก็ข้ามได้เสมอ)"""
+        alive = len(self.alive_ids())
+        if alive <= 0:
+            return 1
+        return max(1, min(skip_needed(alive), alive))
+
+    def skip_count(self) -> int:
+        """จำนวนโหวตข้ามที่นับได้ตอนนี้ (นับเฉพาะคนที่ยังมีชีวิต)"""
+        return len(self.skip_votes & set(self.alive_ids()))
+
+    def check_skip(self):
+        """เช็คว่าครบเกณฑ์ข้ามเวลาคุยหรือยัง (เรียกทุกครั้งที่มีคนกด หรือมีคนตาย)"""
+        if self.state != "day":
+            return
+        have = self.skip_count()
+        if have > 0 and have >= self.skip_need():
+            self.skip_event.set()
 
     def wolf_team_alive(self) -> list:
         return [u for u, p in self.players.items() if p.alive and team_of(p.role) == "wolf"]
@@ -283,8 +312,10 @@ class Game:
         humans = [u for u in alive if team_of(self.players[u].role) != "wolf"]
         if not wolves:
             self.winner = "human"
-        elif not humans:
+        elif len(wolves) >= len(humans):   # หมาป่าเท่ากับหรือมากกว่ามนุษย์ → หมาป่าชนะ
             self.winner = "wolf"
+        else:
+            self.winner = None
         return self.winner is not None
 
     async def kill(self, uid: int) -> list:
@@ -300,6 +331,10 @@ class Game:
             await self.remove_role(u)
             if self.lovers and u in self.lovers:
                 queue.append(self.lovers[1] if self.lovers[0] == u else self.lovers[0])
+        self.check_skip()                  # คนลดลง → เกณฑ์ข้ามลดลงด้วย
+        if self.check_end():               # เกมควรจบแล้ว → ตัดช่วงคุย/โหวตที่ค้างอยู่ทันที
+            self.skip_event.set()
+            self.vote_event.set()
         return dead
 
     # ── การ์ด ──
@@ -323,6 +358,13 @@ class Game:
         return e
 
     # ── ความสามารถกลางคืน ──
+    def bodyguard_cands(self, uid: int) -> list:
+        """คนที่บอดี้การ์ดปกป้องได้คืนนี้ = คนเป็นที่ยังไม่เคยปกป้องในรอบนี้ (ถ้าครบทุกคนเเล้ว เริ่มรอบใหม่)"""
+        p = self.players[uid]
+        alive = self.alive_ids()
+        left = [u for u in alive if u not in p.protected]
+        return left if left else alive
+
     def action_for(self, uid: int):
         """คืน (kind, ผู้เล่นที่เลือกได้, จำนวนที่ต้องเลือก, ข้อความ) หรือ (None, ..., ข้อความอธิบาย)"""
         p = self.players[uid]
@@ -337,7 +379,8 @@ class Game:
                 return None, [], 0, "พี่ใช้ความสามารถฆ่าไปเเล้ว (ได้ 1 ครั้งต่อเกม)"
             return "witch", others, 1, "ต้องการฆ่าใคร (ใช้ได้ครั้งเดียวทั้งเกม ถ้าไม่เลือกคืนนี้ก็ยังเก็บไว้ได้)"
         if p.role == "bodyguard":
-            return "bodyguard", self.alive_ids(), 1, "ต้องการปกป้องใคร"
+            return "bodyguard", self.bodyguard_cands(uid), 1, (
+                "ต้องการปกป้องใคร (ปกป้องคนเดิมซ้ำไม่ได้ จนกว่าจะปกป้องครบทุกคน เเล้วค่อยเริ่มรอบใหม่)")
         if p.role == "mage":
             return "mage", others, 1, "ต้องการร่ายเวทใบ้ใส่ใคร"
         if p.role == "cupid":
@@ -346,10 +389,13 @@ class Game:
             if self.night_no != 1:
                 return None, [], 0, "พี่ใช้ความสามารถได้ในคืนที่ 1 เท่านั้น"
             return "cupid", self.alive_ids(), 2, "เลือก 2 คนให้รักกัน"
-        if p.role == "seer":
-            return "seer", others, 1, "ต้องการดูว่าใครอยู่ฝ่ายหมาป่าหรือมนุษย์"
-        if p.role == "aura":
-            return "aura", others, 1, "ต้องการดูว่าใครเป็นชาวบ้านหรือไม่"
+        if p.role in ("seer", "aura"):
+            left = MAX_LOOKS - p.looks
+            if left <= 0:
+                return None, [], 0, f"พี่ดูครบ {MAX_LOOKS} คนเเล้ว (ดูได้ {MAX_LOOKS} คนต่อทั้งเกม)"
+            what = ("ต้องการดูว่าใครอยู่ฝ่ายหมาป่าหรือมนุษย์" if p.role == "seer"
+                    else "ต้องการดูว่าใครเป็นชาวบ้านหรือไม่")
+            return p.role, others, 1, f"{what} (เหลือสิทธิ์ดูอีก {left}/{MAX_LOOKS} คน)"
         if p.role == "hag":
             return "hag", others, 1, "ต้องการให้ใครออกจากหมู่บ้าน"
         return None, [], 0, "คืนนี้พี่ไม่มีความสามารถที่ต้องใช้ พักผ่อนรอเช้าได้เลย"
@@ -359,10 +405,19 @@ class Game:
         if self.state != "night" or not self.actions_open or not p or not p.alive:
             return await interaction.response.edit_message(
                 embed=emb(f"{E790} หมดเวลาใช้ความสามารถเเล้วน้าา"), view=None)
-        if kind in ("seer", "aura") and uid in self.night_actions:
+        if kind in ("seer", "aura"):
+            if uid in self.night_actions:
+                return await interaction.response.edit_message(
+                    embed=emb(f"{E790} คืนนี้พี่ดูไปเเล้วน้าา"), view=None)
+            if p.looks >= MAX_LOOKS:
+                return await interaction.response.edit_message(
+                    embed=emb(f"{E790} พี่ดูครบ {MAX_LOOKS} คนเเล้วน้าา (ดูได้ {MAX_LOOKS} คนต่อทั้งเกม)"), view=None)
+        if kind == "bodyguard" and targets[0] not in self.bodyguard_cands(uid):
             return await interaction.response.edit_message(
-                embed=emb(f"{E790} คืนนี้พี่ดูไปเเล้วน้าา"), view=None)
+                embed=emb(f"{E790} ปกป้องคนเดิมซ้ำไม่ได้น้าา ต้องปกป้องให้ครบทุกคนก่อน"), view=None)
         self.night_actions[uid] = (kind, targets)
+        if kind in ("seer", "aura"):
+            p.looks += 1
         t = targets[0]
         if kind == "seer":
             r = "หมาป่า" if (team_of(self.players[t].role) == "wolf" or self.players[t].role == "half_wolf") else "มนุษย์"
@@ -390,6 +445,9 @@ class Game:
                 away.add(targets[0])
             elif kind == "bodyguard":
                 protect.add(targets[0])
+                if not [u for u in self.alive_ids() if u not in p.protected]:
+                    p.protected = set()          # ปกป้องครบทุกคนเเล้ว เริ่มรอบใหม่
+                p.protected.add(targets[0])
             elif kind == "mage":
                 silence.add(targets[0])
             elif kind == "wolf":
@@ -527,7 +585,7 @@ class Game:
         end = int(time.time() + dur)
         if first:
             text = (f"# {E739} ตอนมืด {E739}\n\nกำลังอยู่ในระหว่างตอนกลางคืน ห้ามพิมพ์!\n"
-                    f"คืนแรกจะไม่มีอะไรเกิดขึ้น ให้พี่ๆเตรียมตัว ตอนเช้าจะเริ่ม <t:{end}:R>")
+                    f"คืนแรกเป็นช่วงเตรียมตัวเท่านั้น **ไม่มีการฆ่าเเละไม่มีการโหวต** ใช้ความสามารถไม่ได้ ให้พี่ๆดูการ์ดเเล้วเตรียมตัวไว้ ตอนเช้าจะเริ่ม <t:{end}:R>")
         else:
             text = (f"# {E739} คืนที่ {self.night_no} {E739}\n\n"
                     "กำลังอยู่ในระหว่างตอนกลางคืน ห้ามพิมพ์! ตอนเช้าทุกคนจะกลับมาพิมพ์ได้\n"
@@ -558,6 +616,8 @@ class Game:
             f"ถ้าคุยเสร็จเเล้วขี้เกียจรอ พิมพ์ `!time` เพื่อโหวตข้ามไปช่วงโหวต"))
         self.report = []
         await self.wait(dur, self.skip_event)
+        if self.skip_event.is_set() and not self.timed_out and not self.check_end():
+            await self.send(emb(f"{E803} ผู้เล่นที่เหลือโหวตข้ามเวลาคุยครบเเล้ว เข้าสู่ช่วงโหวตเลย!"))
 
     async def vote(self):
         self.state = "vote"
@@ -619,7 +679,7 @@ class Game:
         if self.winner == "human":
             res = f"{E606} **ฝ่ายมนุษย์ชนะ!** หมาป่าถูกกำจัดหมดเเล้ว"
         elif self.winner == "wolf":
-            res = f"{E729} **ฝ่ายหมาป่าชนะ!** ชาวบ้านถูกกำจัดหมดเเล้ว"
+            res = f"{E729} **ฝ่ายหมาป่าชนะ!** หมาป่ามีจำนวนเท่ากับหรือมากกว่ามนุษย์เเล้ว"
         else:
             res = f"{E597} **หมดเวลา 1 ชั่วโมง** เกมจบเเบบไม่มีผู้ชนะ"
         roles_text = "\n".join(
@@ -785,11 +845,10 @@ class SkipView(discord.ui.View):
             return await interaction.response.send_message(
                 embed=emb(f"{E790} ตอนนี้โหวตข้ามไม่ได้น้า"), ephemeral=True)
         g.skip_votes.add(interaction.user.id)
-        need = skip_needed(len(g.alive_ids()))
+        need = g.skip_need()
         await interaction.response.send_message(
-            embed=emb(f"{E606} โหวตข้ามเเล้ว ({len(g.skip_votes)}/{need})"), ephemeral=True)
-        if len(g.skip_votes) >= need:
-            g.skip_event.set()
+            embed=emb(f"{E606} โหวตข้ามเเล้ว ({g.skip_count()}/{need})"), ephemeral=True)
+        g.check_skip()
 
 
 class OwnCardView(discord.ui.View):
@@ -1171,10 +1230,10 @@ class WerewolfCog(commands.Cog):
             if cmd == "!time":
                 if g.state != "day" or not p or not p.alive:
                     return await warn("!time ใช้ได้ตอนเช้า เเละต้องเป็นผู้เล่นที่ยังไม่ตายน้า")
-                need = skip_needed(len(g.alive_ids()))
+                need = g.skip_need()
                 try:
                     await message.channel.send(
-                        embed=emb(f"{E739} ให้พี่ๆโหวตว่าจะข้ามเวลาคุยเลยมั้ย ต้องมีคนกด **{need}** คนถึงจะข้าม"),
+                        embed=emb(f"{E739} ให้พี่ๆโหวตว่าจะข้ามเวลาคุยเลยมั้ย ต้องมีคนกด **{need}** คนถึงจะข้าม (ถ้าคนเหลือน้อย เกณฑ์จะลดลงตามจำนวนคนที่เหลือ)"),
                         view=SkipView(g), delete_after=120)
                 except discord.HTTPException:
                     pass
