@@ -1,8 +1,9 @@
-import hashlib
+import base64
 import io
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 import discord
@@ -11,51 +12,97 @@ from discord.ext import commands, tasks
 
 from database import db
 
-FILE_NAME = "bot_backup.json"
-INTERVAL_MIN = 2   # เช็คทุกกี่นาที (ส่งไฟล์ใหม่เฉพาะตอนข้อมูลเปลี่ยน)
-KEEP = 5           # เก็บไฟล์สำรองล่าสุดกี่ไฟล์
+PREFIX = "bot_backup_"        # bot_backup_<ชุด>_<ลำดับ>.json  และ bot_backup_<ชุด>_done.json
+LEGACY_NAME = "bot_backup.json"
+PART_LIMIT = 6 * 1024 * 1024  # ขนาด JSON ต่อไฟล์ (ต่ำกว่าลิมิตอัปโหลดของ Discord)
+INTERVAL_MIN = 2              # เช็คทุกกี่นาที
+KEEP_SETS = 2                 # เก็บชุดสำรองล่าสุดกี่ชุด
 
 
-def dump() -> dict:
+def enc(v):
+    return {"__b64__": base64.b64encode(bytes(v)).decode()} if isinstance(v, (bytes, bytearray, memoryview)) else v
+
+
+def dec(v):
+    return base64.b64decode(v["__b64__"]) if isinstance(v, dict) and "__b64__" in v else v
+
+
+def table_list(conn):
+    cur = conn.cursor()
+    cur.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    return cur.fetchall()
+
+
+def count_rows() -> int:
     conn = db.get_connection()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        out = {}
-        for name, sql in cur.fetchall():
-            cur.execute(f'SELECT * FROM "{name}"')
-            cols = [d[0] for d in cur.description]
-            out[name] = {"sql": sql, "cols": cols, "rows": [list(r) for r in cur.fetchall()]}
-        return out
+        total = 0
+        for name, _ in table_list(conn):
+            cur.execute(f'SELECT COUNT(*) FROM "{name}"')
+            total += cur.fetchone()[0]
+        return total
     finally:
         conn.close()
 
 
-def total_rows(data: dict) -> int:
-    return sum(len(t["rows"]) for t in data.values())
+def iter_parts():
+    """อ่านฐานข้อมูลทีละแถว แล้วแบ่งเป็นก้อน JSON ไม่เกิน PART_LIMIT (ไม่โหลดทั้งก้อนเข้าหน่วยความจำ)"""
+    conn = db.get_connection()
+    try:
+        part, size = {}, 0
+        for name, sql in table_list(conn):
+            cur = conn.cursor()
+            cur.execute(f'SELECT * FROM "{name}"')
+            cols = [d[0] for d in cur.description]
+            for row in cur:
+                r = [enc(v) for v in row]
+                est = len(json.dumps(r, ensure_ascii=False)) + 2
+                if size + est > PART_LIMIT and size > 0:
+                    yield {"v": 2, "tables": part}
+                    part, size = {}, 0
+                t = part.setdefault(name, {"sql": sql, "cols": cols, "rows": []})
+                t["rows"].append(r)
+                size += est
+        if part:
+            yield {"v": 2, "tables": part}
+    finally:
+        conn.close()
 
 
-def digest(data: dict) -> str:
-    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
-
-
-def restore(data: dict):
+def apply_data(data: dict):
+    """กู้คืนจากข้อมูล 1 ก้อน (รองรับรูปแบบเก่า v1 และใหม่ v2)"""
+    tables = data["tables"] if data.get("v") == 2 else data
     conn = db.get_connection()
     try:
         cur = conn.cursor()
-        for name, t in data.items():
+        for name, t in tables.items():
             sql = t["sql"]
             if sql and "IF NOT EXISTS" not in sql[:60].upper():
                 sql = sql.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1)
             cur.execute(sql)
-            if not t["rows"]:
-                continue
-            cols = ", ".join(f'"{c}"' for c in t["cols"])
-            ph = ", ".join("?" * len(t["cols"]))
-            cur.executemany(f'INSERT OR REPLACE INTO "{name}" ({cols}) VALUES ({ph})', t["rows"])
+            if t["rows"]:
+                cols = ", ".join(f'"{c}"' for c in t["cols"])
+                ph = ", ".join("?" * len(t["cols"]))
+                cur.executemany(f'INSERT OR REPLACE INTO "{name}" ({cols}) VALUES ({ph})',
+                                [[dec(v) for v in row] for row in t["rows"]])
         conn.commit()
     finally:
         conn.close()
+
+
+def db_signature():
+    path = getattr(db, "db_name", None)
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except Exception:
+        return None
+
+
+def db_size_mb() -> float:
+    sig = db_signature()
+    return (sig[1] / 1_048_576) if sig else 0.0
 
 
 def clear_caches():
@@ -73,7 +120,8 @@ def emb(text: str) -> discord.Embed:
 class BackupCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.last_hash = None
+        self.last_sig = None
+        self.last_save = 0.0
         self.started = False
 
     async def target(self):
@@ -84,13 +132,26 @@ class BackupCog(commands.Cog):
         owner = info.team.owner if info.team else info.owner
         return await owner.create_dm()
 
-    async def backups(self, ch):
-        """ข้อความสำรองของบอท เรียงใหม่ → เก่า"""
-        out = []
-        async for m in ch.history(limit=200):
-            if m.author.id == self.bot.user.id and any(a.filename == FILE_NAME for a in m.attachments):
-                out.append(m)
-        return out
+    async def scan(self, ch):
+        """คืน {ชุด: {"parts": {i: attachment}, "done": attachment|None, "msgs": [message]}} และไฟล์เก่า (v1)"""
+        sets, legacy = {}, []
+        async for m in ch.history(limit=1000):
+            if m.author.id != self.bot.user.id:
+                continue
+            for a in m.attachments:
+                n = a.filename
+                if n == LEGACY_NAME:
+                    legacy.append(a)
+                elif n.startswith(PREFIX) and n.endswith(".json"):
+                    body = n[len(PREFIX):-5]            # <ชุด>_<ลำดับ|done>
+                    sid, _, tail = body.rpartition("_")
+                    s = sets.setdefault(sid, {"parts": {}, "done": None, "msgs": []})
+                    s["msgs"].append(m)
+                    if tail == "done":
+                        s["done"] = a
+                    elif tail.isdigit():
+                        s["parts"][int(tail)] = a
+        return sets, legacy
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -105,41 +166,69 @@ class BackupCog(commands.Cog):
             self.loop.start()
 
     async def try_restore(self):
-        local = dump()
-        if total_rows(local) > 0:  # มีข้อมูลอยู่แล้ว ไม่ทับ
-            self.last_hash = digest(local)
-            print(f"[backup] มีข้อมูลในไฟล์อยู่แล้ว ({total_rows(local)} แถว) ไม่ต้องกู้คืน")
+        rows = count_rows()
+        if rows > 0:  # มีข้อมูลอยู่แล้ว ไม่ทับ
+            self.last_sig = db_signature()
+            print(f"[backup] มีข้อมูลในไฟล์อยู่แล้ว ({rows} แถว) ไม่ต้องกู้คืน")
             return
         ch = await self.target()
-        msgs = await self.backups(ch)
-        if not msgs:
-            print("[backup] ไฟล์ข้อมูลว่าง และยังไม่มีไฟล์สำรองให้กู้คืน")
+        sets, legacy = await self.scan(ch)
+        # ชุดใหม่สุดที่ครบทุกไฟล์ (ชื่อชุด = เวลา จึงเรียงตามตัวเลขได้)
+        for sid in sorted(sets, reverse=True):
+            s = sets[sid]
+            if not s["done"]:
+                continue
+            n = json.loads((await s["done"].read()).decode("utf-8"))["parts"]
+            if all(i in s["parts"] for i in range(1, n + 1)):
+                total = 0
+                for i in range(1, n + 1):
+                    data = json.loads((await s["parts"][i].read()).decode("utf-8"))
+                    apply_data(data)
+                    total += sum(len(t["rows"]) for t in data["tables"].values())
+                clear_caches()
+                self.last_sig = db_signature()
+                print(f"[backup] กู้คืนข้อมูลสำเร็จ ({total} แถว จาก {n} ไฟล์)")
+                return
+        if legacy:  # ไฟล์สำรองรูปแบบเก่า
+            data = json.loads((await legacy[0].read()).decode("utf-8"))
+            apply_data(data)
+            clear_caches()
+            self.last_sig = db_signature()
+            print("[backup] กู้คืนข้อมูลสำเร็จ (ไฟล์สำรองรูปแบบเก่า)")
             return
-        att = next(a for a in msgs[0].attachments if a.filename == FILE_NAME)
-        data = json.loads((await att.read()).decode("utf-8"))
-        restore(data)
-        clear_caches()
-        self.last_hash = digest(dump())
-        print(f"[backup] กู้คืนข้อมูลสำเร็จ ({total_rows(data)} แถว)")
+        print("[backup] ไฟล์ข้อมูลว่าง และยังไม่มีไฟล์สำรองให้กู้คืน")
 
     async def save(self, force: bool = False):
-        data = dump()
-        if total_rows(data) == 0:  # ห้ามส่งไฟล์ว่างไปทับของดี
+        if count_rows() == 0:  # ห้ามส่งไฟล์ว่างไปทับของดี
             return "empty"
-        h = digest(data)
-        if not force and h == self.last_hash:
-            return "same"
+        sig = db_signature()
+        if not force:
+            if sig is not None and sig == self.last_sig:
+                return "same"
+            # ฐานข้อมูลยิ่งใหญ่ ยิ่งสำรองห่างขึ้น (กันส่งไฟล์ใหญ่ถี่ๆ)
+            if time.time() - self.last_save < min(6 * 3600, 120 + db_size_mb() * 60):
+                return "wait"
         ch = await self.target()
-        raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        await ch.send(f"สำรองข้อมูล {stamp} ({total_rows(data)} แถว)",
-                      file=discord.File(io.BytesIO(raw), filename=FILE_NAME))
-        self.last_hash = h
-        for old in (await self.backups(ch))[KEEP:]:  # ลบไฟล์เก่าเกินที่เก็บ
-            try:
-                await old.delete()
-            except discord.HTTPException:
-                pass
+        sid = str(int(time.time()))
+        n = 0
+        for part in iter_parts():
+            n += 1
+            raw = json.dumps(part, ensure_ascii=False).encode("utf-8")
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            await ch.send(f"สำรองข้อมูล {stamp} (ไฟล์ {n})",
+                          file=discord.File(io.BytesIO(raw), filename=f"{PREFIX}{sid}_{n}.json"))
+        await ch.send(f"สำรองข้อมูลครบ {n} ไฟล์",
+                      file=discord.File(io.BytesIO(json.dumps({"parts": n}).encode()), filename=f"{PREFIX}{sid}_done.json"))
+        self.last_sig, self.last_save = sig, time.time()
+
+        # ลบชุดเก่าเกินที่เก็บ (รวมไฟล์รูปแบบเก่า)
+        sets, legacy = await self.scan(ch)
+        for old_sid in sorted(sets, reverse=True)[KEEP_SETS:]:
+            for m in sets[old_sid]["msgs"]:
+                try:
+                    await m.delete()
+                except discord.HTTPException:
+                    pass
         return "saved"
 
     @tasks.loop(minutes=INTERVAL_MIN)
@@ -149,7 +238,7 @@ class BackupCog(commands.Cog):
         except Exception as e:
             print(f"[backup] สำรองไม่สำเร็จ: {e}")
 
-    @app_commands.command(name="backup", description="สำรองข้อมูลทันที (เจ้าของบอทเท่านั้น)")
+    @app_commands.command(name="backup_now", description="สำรองข้อมูลทันที (เจ้าของบอทเท่านั้น)")
     async def backup_now(self, interaction: discord.Interaction):
         if not await self.bot.is_owner(interaction.user):
             return await interaction.response.send_message(embed=emb("ไม่ได้น้าา เฉพาะเจ้าของบอทเท่านั้น"), ephemeral=True)
