@@ -312,7 +312,7 @@ class Donate(commands.Cog):
                 "panel_msg_id) VALUES (?,?,?,?,?)", (guild.id, phone, ch.id, log.id, msg.id))
         return ch, log
 
-    @app_commands.command(name="donate", description="ตั้งค่าระบบโดเนท สร้างห้องโดเนทเเละห้องล็อก (เเอดมินเท่านั้น)")
+    @app_commands.command(name="donate", description="ตั้งค่าระบบโดเนท (เเอดมินเท่านั้น)")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def donate(self, interaction: discord.Interaction):
