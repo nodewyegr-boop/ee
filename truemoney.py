@@ -4,6 +4,7 @@ import io
 import os
 import sqlite3
 import time
+import traceback
 from typing import Optional
 
 import aiohttp
@@ -15,7 +16,7 @@ from database import db
 
 
 def _import_truemoney():
-    """โหลด truemoney.py ให้ได้ ไม่ว่าจะวางข้ง main.py หรือในโฟลเดอร์ cogs"""
+    """โหลด truemoney.py ให้ได้ ไม่ว่าจะวางข้าง main.py หรือในโฟลเดอร์ cogs"""
     try:
         import truemoney as mod
         return mod
@@ -186,6 +187,20 @@ def err_embed(text: str) -> discord.Embed:
     return discord.Embed(description=text, colour=COLOR)
 
 
+async def report_error(interaction: discord.Interaction, where: str, error: Exception):
+    """พิมพ์ traceback ลง log เเละบอกผู้ใช้ เเทนที่จะขึ้นเเค่ "เเอปพลิเคชันไม่ตอบสนอง" """
+    print(f"[donate] ผิดพลาดที่ {where}: {type(error).__name__}: {error}")
+    traceback.print_exception(type(error), error, error.__traceback__)
+    embed = err_embed(f"เกิดข้อผิดพลาดในระบบโดเนท (`{type(error).__name__}`) เเจ้งเจ้าของเซิฟเวอร์น้า")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
 # ───────────────────────── UI ─────────────────────────
 def is_server_owner(interaction: discord.Interaction) -> bool:
     """เจ้าของเซิฟเวอร์เท่านั้น (ไม่รวมเเอดมิน/เจ้าของบอท)"""
@@ -203,6 +218,9 @@ class PhoneModal(discord.ui.Modal, title="ตั้งค่าระบบโ�
         super().__init__(timeout=600)
         self.cog = cog
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await report_error(interaction, "PhoneModal", error)
+
     async def on_submit(self, interaction: discord.Interaction):
         if not is_server_owner(interaction):
             return await interaction.response.send_message(embed=err_embed(NOT_OWNER), ephemeral=True)
@@ -215,8 +233,12 @@ class PhoneModal(discord.ui.Modal, title="ตั้งค่าระบบโ�
             ch, log = await self.cog.setup_guild(interaction.guild, phone)
         except discord.Forbidden:
             return await interaction.followup.send(embed=err_embed(
-                "บอทไม่มีสิทธิ์สร้างห้อง/ส่งข้อความ (ต้องมี Manage Channels, Send Messages, Embed Links)"),
-                ephemeral=True)
+                "บอทไม่มีสิทธิ์สร้างห้อง/ส่งข้อความ (ต้องมี Manage Channels, Send Messages, Embed Links, "
+                "Manage Messages, Attach Files, Use External Emojis) ให้สิทธิ์เเล้วลองใหม่น้า"), ephemeral=True)
+        except discord.HTTPException as e:
+            print(f"[donate] ตั้งค่าห้องไม่สำเร็จ: {e.status} {e.code} {e.text}")
+            return await interaction.followup.send(embed=err_embed(
+                f"สร้างห้อง/ส่งเเผงไม่สำเร็จ: `{e.status} {e.text[:150]}`"), ephemeral=True)
         await interaction.followup.send(embed=err_embed(
             f"ตั้งค่าระบบโดเนทเเล้ว\nเบอร์รับเงิน: `{phone[:3]}-xxx-{phone[-4:]}`\n"
             f"ห้องโดเนท: {ch.mention}\nห้องล็อก: {log.mention}"), ephemeral=True)
@@ -230,6 +252,9 @@ class PayModal(discord.ui.Modal, title="โดเนทด้วยซองอ�
         super().__init__(timeout=600)
         self.cog = cog
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await report_error(interaction, "PayModal", error)
+
     async def on_submit(self, interaction: discord.Interaction):
         await self.cog.process_donation(interaction, self.link.value)
 
@@ -238,6 +263,9 @@ class DonateView(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=None)
         self.cog = cog
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await report_error(interaction, "DonateView", error)
 
     @discord.ui.button(label="โดเนท", emoji=emo(E_DONATE), style=discord.ButtonStyle.success,
                        custom_id="donate:pay")
@@ -269,6 +297,7 @@ class Donate(commands.Cog):
     async def cog_load(self):
         await asyncio.to_thread(_init_tables)
         self.bot.add_view(DonateView(self))
+        print("[donate] พร้อมใช้งาน (ถ้า /donate ยังไม่ขึ้นหรือกดเเล้วไม่ตอบสนอง ให้เช็คว่า bot.tree.sync() เเล้ว)")
 
     # ---- รูปเเบนเนอร์ (เก็บในฐานข้อมูล เพราะลิงก์ Discord หมดอายุ) ----
     async def get_banner(self):
@@ -326,16 +355,21 @@ class Donate(commands.Cog):
             read_message_history=True, manage_messages=True, use_external_emojis=True)
         overwrites = {guild.default_role: everyone, guild.me: me}
 
-        async def ensure(channel_id, name):
+        async def ensure(channel_id, name, fallback):
             ch = guild.get_channel(channel_id) if channel_id else None
             if ch is None:
-                return await guild.create_text_channel(name, overwrites=overwrites, reason="ระบบโดเนท")
+                try:
+                    return await guild.create_text_channel(name, overwrites=overwrites, reason="ระบบโดเนท")
+                except discord.HTTPException as e:
+                    if e.status != 400:      # 400 = ชื่อห้องไม่ผ่าน → ใช้ชื่อสำรอง
+                        raise
+                    return await guild.create_text_channel(fallback, overwrites=overwrites, reason="ระบบโดเนท")
             await ch.set_permissions(guild.default_role, overwrite=everyone)
             await ch.set_permissions(guild.me, overwrite=me)
             return ch
 
-        ch = await ensure(cfg["channel_id"] if cfg else None, DONATE_CHANNEL)
-        log = await ensure(cfg["log_channel_id"] if cfg else None, LOG_CHANNEL)
+        ch = await ensure(cfg["channel_id"] if cfg else None, DONATE_CHANNEL, "donate")
+        log = await ensure(cfg["log_channel_id"] if cfg else None, LOG_CHANNEL, "log-donate")
         if cfg and cfg["panel_msg_id"]:
             try:
                 await (await ch.fetch_message(cfg["panel_msg_id"])).delete()
@@ -353,6 +387,10 @@ class Donate(commands.Cog):
         if not is_server_owner(interaction):
             return await interaction.response.send_message(embed=err_embed(NOT_OWNER), ephemeral=True)
         await interaction.response.send_modal(PhoneModal(self))
+
+    @donate.error
+    async def donate_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        await report_error(interaction, "/donate", error)
 
     # ---- โดเนท ----
     async def process_donation(self, interaction: discord.Interaction, raw: str):
