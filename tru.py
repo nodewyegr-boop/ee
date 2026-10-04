@@ -15,7 +15,7 @@ from database import db
 
 
 def _import_truemoney():
-    """โหลด truemoney.py ให้ได้ ไม่ว่าจะวางข้าง main.py หรือในโฟลเดอร์ cogs"""
+    """โหลด truemoney.py ให้ได้ ไม่ว่าจะวางข้ง main.py หรือในโฟลเดอร์ cogs"""
     try:
         import truemoney as mod
         return mod
