@@ -1,106 +1,124 @@
-import hmac
+import json
 import os
 import re
-import time
-from collections import defaultdict, deque
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Optional
 
-import requests
-from flask import Flask, jsonify, request
+import aiohttp
 
-API_KEY = os.environ.get("API_KEY", "")
-if len(API_KEY) < 16:
-    raise SystemExit("ต้องตั้งตัวแปร API_KEY ให้ยาวอย่างน้อย 16 ตัวอักษร")
-PROXY_URL = os.environ.get("PROXY_URL", "").strip()
-PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+API_URL = os.getenv("DONATE_API_URL", "https://api.kasawa.pro/api/wallet/topup")
+TIMEOUT = 25
 
-URL = "https://gift.truemoney.com/campaign/vouchers/{code}/redeem"
-HEADERS = {
-    "Content-Type": "application/json", "Accept": "application/json",
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36",
-    "Origin": "https://gift.truemoney.com",
+# รหัส error ของ TrueMoney → ข้อความไทย (เช็คจากข้อความที่ API ตอบกลับมา)
+MESSAGES = {
+    "VOUCHER_NOT_FOUND": "ไม่พบซองนี้ ตรวจสอบลิงก์อีกครั้งน้า",
+    "VOUCHER_EXPIRED": "ซองนี้หมดอายุเเล้ว",
+    "VOUCHER_OUT_OF_STOCK": "ซองนี้ถูกรับไปหมดเเล้ว",
+    "TARGET_USER_REDEEMED": "ซองนี้ถูกรับไปเเล้ว",
+    "CANNOT_GET_OWN_VOUCHER": "ซองนี้เป็นของเจ้าของเบอร์รับเงิน ใช้โดเนทกับตัวเองไม่ได้น้า",
+    "TARGET_USER_NOT_FOUND": "ไม่พบบัญชี TrueMoney Wallet ของเบอร์ที่รับเงิน เเจ้งเจ้าของเซิฟน้า",
+    "INTERNAL_ERROR": "ระบบ TrueMoney ขัดข้องชั่วคราว ลองใหม่อีกครั้งน้า",
 }
-RATE_PER_MIN = 30
-HITS = defaultdict(deque)
-app = Flask(__name__)
+GENERIC = {
+    "INVALID_CODE": "ลิงก์ซองไม่ถูกต้อง ต้องเป็นลิงก์เเบบ https://gift.truemoney.com/campaign/?v=...",
+    "INVALID_PHONE": "เบอร์รับเงินไม่ถูกต้อง เเจ้งเจ้าของเซิฟน้า",
+    "NETWORK": "เชื่อมต่อระบบตรวจซองไม่ได้ในตอนนี้ ลองใหม่อีกครั้งน้า",
+    "RATE_LIMIT": "ระบบตรวจซองถูกใช้งานถี่เกินไป รอสักครู่เเล้วลองใหม่น้า",
+    "BAD_RESPONSE": "ระบบตรวจซองตอบกลับผิดรูปเเบบ ลองใหม่อีกครั้งน้า",
+    "FAILED": "ซองนี้ใช้โดเนทไม่ได้ ตรวจสอบลิงก์เเล้วลองใหม่น้า",
+}
 
 
-def mask(s: str) -> str:
-    return s[:3] + "…" + s[-3:] if len(s) > 8 else "***"
+@dataclass
+class RedeemResult:
+    ok: bool
+    code: str                 # SUCCESS หรือรหัส error
+    message: str              # ข้อความภาษาไทยสำหรับผู้ใช้
+    satang: int = 0           # จำนวนเงินเป็นสตางค์ (กันเลขทศนิยมเพี้ยน)
+    owner_name: str = ""      # ชื่อ-นามสกุลเจ้าของซอง (owner_profile.full_name)
+    detail: str = ""          # รายละเอียดสำหรับล็อกของเจ้าของบอท (ไม่โชว์ผู้ใช้)
+
+    @property
+    def baht(self) -> float:
+        return self.satang / 100
 
 
-def authorized() -> bool:
-    return hmac.compare_digest(request.headers.get("X-API-Key", "").encode(), API_KEY.encode())
+def normalize_phone(text: str) -> Optional[str]:
+    """เเปลงเบอร์เป็น 0XXXXXXXXX (รับ 08x-xxx-xxxx, +668xxxxxxxx, 668xxxxxxxx)"""
+    digits = re.sub(r"\D", "", text or "")
+    if digits.startswith("66") and len(digits) == 11:
+        digits = "0" + digits[2:]
+    return digits if re.fullmatch(r"0\d{9}", digits) else None
 
 
-@app.get("/")
-def health():
-    return jsonify(ok=True, service="truemoney-redeem", proxy=bool(PROXIES))
+def extract_code(text: str) -> Optional[str]:
+    """ดึงโค้ดซองจากลิงก์ https://gift.truemoney.com/campaign/?v=XXXX หรือโค้ดล้วนๆ"""
+    text = (text or "").strip()
+    m = re.search(r"[?&]v=([0-9A-Za-z]+)", text)
+    code = m.group(1) if m else (text if re.fullmatch(r"[0-9A-Za-z]{18,64}", text) else None)
+    return code if code and 18 <= len(code) <= 64 else None
 
 
-@app.get("/diag")
-def diag():
-    """เช็กไอพีขาออก + TrueMoney บล็อกมั้ย (ไม่ได้รับซองจริง)"""
-    if not authorized():
-        return jsonify(ok=False, status="UNAUTHORIZED"), 401
-    out = {"proxy": bool(PROXIES)}
+def _satang(value) -> int:
     try:
-        out["outbound_ip"] = requests.get("https://api.ipify.org", timeout=8, proxies=PROXIES).text.strip()
-    except requests.RequestException as e:
-        out["outbound_ip"] = f"error: {type(e).__name__}"
+        return int((Decimal(str(value)) * 100).to_integral_value())
+    except (InvalidOperation, ValueError, TypeError):
+        return 0
+
+
+def parse_response(http_status: int, text: str) -> RedeemResult:
+    """เเปลงคำตอบของ API เป็น RedeemResult (ฟังก์ชันล้วนๆ ทดสอบได้โดยไม่ต้องต่อเน็ต)"""
     try:
-        r = requests.get("https://gift.truemoney.com/campaign/", headers=HEADERS, timeout=10, proxies=PROXIES)
-        body = r.text.lower()
-        out["truemoney_http"] = r.status_code
-        out["blocked_hint"] = r.status_code in (403, 429) or "just a moment" in body or "attention required" in body
-    except requests.RequestException as e:
-        out["truemoney_http"] = f"error: {type(e).__name__}"
-        out["blocked_hint"] = True
-    return jsonify(out)
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        code = "RATE_LIMIT" if http_status == 429 else "BAD_RESPONSE"
+        return RedeemResult(False, code, GENERIC[code],
+                            detail=f"HTTP {http_status} ไม่ใช่ JSON: {(text or '')[:200]!r}")
+    if not isinstance(data, dict):
+        return RedeemResult(False, "BAD_RESPONSE", GENERIC["BAD_RESPONSE"], detail=str(data)[:200])
+
+    msg = data.get("message")
+    if data.get("status") is True and isinstance(msg, dict) and msg.get("voucher"):
+        voucher = msg["voucher"] or {}
+        ticket = msg.get("my_ticket") or {}
+        satang = (_satang(ticket.get("amount_baht")) or _satang(voucher.get("redeemed_amount_baht"))
+                  or _satang(voucher.get("amount_baht")))
+        if satang <= 0:
+            return RedeemResult(False, "BAD_RESPONSE", GENERIC["BAD_RESPONSE"],
+                                detail="status=True เเต่อ่านจำนวนเงินไม่ได้")
+        name = ((msg.get("owner_profile") or {}).get("full_name") or ticket.get("full_name") or "").strip()
+        return RedeemResult(True, "SUCCESS", "สำเร็จ", satang=satang, owner_name=name)
+
+    # ไม่สำเร็จ: หารหัส error ของ TrueMoney ในข้อความที่ตอบกลับมา
+    raw = msg if isinstance(msg, str) else json.dumps(msg, ensure_ascii=False) if msg else ""
+    raw = raw or json.dumps(data, ensure_ascii=False)
+    upper = raw.upper()
+    for code, th in MESSAGES.items():
+        if code in upper:
+            return RedeemResult(False, code, th, detail=f"HTTP {http_status} {raw[:200]}")
+    code = "RATE_LIMIT" if http_status == 429 else "FAILED"
+    return RedeemResult(False, code, GENERIC[code], detail=f"HTTP {http_status} {raw[:200]}")
 
 
-@app.post("/redeem")
-def redeem():
-    if not authorized():
-        return jsonify(ok=False, status="UNAUTHORIZED"), 401
-    now, dq = time.time(), HITS[request.remote_addr]
-    while dq and now - dq[0] > 60:
-        dq.popleft()
-    if len(dq) >= RATE_PER_MIN:
-        return jsonify(ok=False, status="RATE_LIMITED"), 429
-    dq.append(now)
+async def _post(payload: dict):
+    timeout = aiohttp.ClientTimeout(total=TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        async with s.post(API_URL, json=payload) as r:
+            return r.status, await r.text()
 
-    data = request.get_json(silent=True) or {}
-    mobile, code = str(data.get("mobile", "")), str(data.get("code", ""))
-    if not re.fullmatch(r"0\d{9}", mobile) or not re.fullmatch(r"[0-9A-Za-z]{10,64}", code):
-        return jsonify(ok=False, status="BAD_REQUEST"), 400
+
+async def redeem(link_or_code: str, phone: str) -> RedeemResult:
+    """เเลกซองอั่งเปาเข้าเบอร์ phone เเล้วคืนผลลัพธ์"""
+    code = extract_code(link_or_code)
+    if not code:
+        return RedeemResult(False, "INVALID_CODE", GENERIC["INVALID_CODE"])
+    mobile = normalize_phone(phone)
+    if not mobile:
+        return RedeemResult(False, "INVALID_PHONE", GENERIC["INVALID_PHONE"])
+    link = f"https://gift.truemoney.com/campaign/?v={code}"
     try:
-        r = requests.post(URL.format(code=code), json={"mobile": mobile, "voucher_hash": code},
-                          headers={**HEADERS, "Referer": f"https://gift.truemoney.com/campaign/?v={code}"},
-                          timeout=15, proxies=PROXIES)
-    except requests.RequestException:
-        print(f"[redeem] {mask(code)} → NETWORK error")
-        return jsonify(ok=False, status="NETWORK", http=0)
-    try:
-        j = r.json()
-    except ValueError:
-        status = "ACCESS_DENIED" if r.status_code in (403, 429) else f"HTTP_{r.status_code}"
-        print(f"[redeem] {mask(code)} → ไม่ใช่ JSON (HTTP {r.status_code}) {status}")
-        return jsonify(ok=False, status=status, http=r.status_code)
-
-    status = (j.get("status") or {}).get("code", "UNKNOWN") if isinstance(j, dict) else "UNKNOWN"
-    amount, name = 0.0, ""
-    if status == "SUCCESS":
-        d = j.get("data") or {}
-        amt = (d.get("my_ticket") or {}).get("amount_baht") or (d.get("voucher") or {}).get("amount_baht") or "0"
-        try:
-            amount = float(str(amt).replace(",", ""))
-        except ValueError:
-            pass
-        name = ((d.get("owner_profile") or {}).get("full_name")
-                or (d.get("voucher") or {}).get("owner_full_name") or "")
-    print(f"[redeem] {mask(code)} → {status} ({amount})")
-    return jsonify(ok=status == "SUCCESS", amount=amount, name=name, status=status, http=r.status_code)
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+        status, text = await _post({"phone": mobile, "vouch": link})
+    except Exception as e:  # noqa: BLE001  (timeout / DNS / เซิร์ฟเวอร์ API ล่ม)
+        return RedeemResult(False, "NETWORK", GENERIC["NETWORK"], detail=f"{type(e).__name__}: {e}")
+    return parse_response(status, text)
